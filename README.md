@@ -1,23 +1,21 @@
-# @orkestrel/reason
+# @orkestrel/pool
 
-A zero-dependency, synchronous, deterministic **reasoning engine**: declarative,
-JSON-serializable **definitions** are evaluated against **subjects** (plain
-data records) to produce traceable **results**. Four strategies behind one
-dispatch surface — `quantitative` (factor-based numeric scoring), `logical`
-(rule-based boolean deduction with forward / backward chaining), `symbolic`
-(algebraic equation solving by variable isolation), `inferential` (fact
-derivation with unification variables and proof trees) — each a
-`ReasonerInterface` registered on the thin `Reason` orchestrator, with three
-injectable operators (`Evaluator` / `Transformer` / `Aggregator`) doing the
-shared arithmetic. Every result is a fresh object carrying `success`, a
-human-readable `trace`, and accumulated `errors`; nothing mutates its inputs.
-Environment-agnostic — no I/O, no browser or server assumptions. Part of the
-`@orkestrel` line.
+A bounded, typed **resource pool**: idle reuse + FIFO waiting. `acquire` leases
+a resource — reusing a validated idle one, growing up to `max`, or parking on
+a FIFO waiter list until a `release` frees one — and the returned token's
+`release()` returns it for reuse (or hands it straight to the next waiter).
+The FIFO handoff is validated, so a resource that goes bad while leased is
+never handed to the next lessee, and a parked `acquire` given an `AbortSignal`
+rejects and de-queues itself when the signal fires — no leaked waiter. The
+pool is observable (a typed `emitter` surfaces `create` / `acquire` /
+`release` / `destroy`) and deliberately de-bloated — no warm-floor, no
+eviction timers. Environment-agnostic — no I/O, no browser or server
+assumptions. Part of the `@orkestrel` line.
 
 ## Install
 
 ```sh
-npm install @orkestrel/reason
+npm install @orkestrel/pool
 ```
 
 ## Requirements
@@ -28,41 +26,27 @@ npm install @orkestrel/reason
 ## Usage
 
 ```ts
-import {
-	createQuantitativeReasoner,
-	createReason,
-	factorGroup,
-	fieldFactor,
-	quantitativeDefinition,
-	staticFactor,
-} from '@orkestrel/reason'
+import { createPool } from '@orkestrel/pool'
 
-const reason = createReason({ reasoners: [createQuantitativeReasoner()] })
+const pool = createPool<Connection>({
+	create: () => connect(),
+	destroy: (connection) => connection.close(),
+	validate: (connection) => connection.alive,
+	max: 8,
+})
 
-const definition = quantitativeDefinition('risk', 'Risk score', [
-	factorGroup('drivers', 'sum', [
-		fieldFactor('age', 'age'), // reads subject.age, parseNumber-coerced
-		staticFactor('floor', 10), // a fixed contribution
-	]),
-])
-
-const result = reason.reason({ age: 25 }, definition) // one subject → one result
-if (result.reasoning === 'quantitative') result.value // 35 — narrow by the discriminant
-result.trace // the step-by-step account of how the value came to be
+const token = await pool.acquire()
+try {
+	await token.value.query('select 1')
+} finally {
+	token.release()
+}
 ```
-
-`reason` dispatches by `definition.reasoning` — pass an ARRAY of subjects and
-the batch overload maps them in order to an equal-length result array.
-Results are a discriminated union (`reasoning` names the axis): narrow with
-the discriminant and read the strategy-specific payload (`value` /
-`conclusion` / `solutions` / `derived`).
 
 ## Guide
 
-For the full surface — the orchestrator, the four reasoners, the three
-operators, the definitions & subjects capability layer, the two workspace
-builders (`DefinitionBuilder` / `SubjectBuilder`), validators, errors, and the
-observation surface — see [`guides/src/reason.md`](guides/src/reason.md).
+For the full surface — the `Pool` engine, options, the observable `emitter`,
+and usage patterns — see [`guides/src/pool.md`](guides/src/pool.md).
 
 ## Package
 

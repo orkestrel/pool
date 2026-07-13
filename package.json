@@ -1,21 +1,20 @@
 {
-	"name": "@orkestrel/reason",
+	"name": "@orkestrel/pool",
 	"version": "0.0.1",
-	"description": "A typed reasoning engine: definitions, subjects, and quantitative/logical/symbolic/inferential reasoners. Part of the @orkestrel line.",
+	"description": "A bounded, typed resource pool — idle reuse, max backpressure, FIFO abort-cancellable waiting, and an observable lifecycle emitter. Part of the @orkestrel line.",
 	"keywords": [
-		"decision-engine",
-		"inference",
-		"reason",
-		"reasoning",
-		"rules-engine",
+		"connection-pool",
+		"fifo",
+		"pool",
+		"resource-pool",
 		"typescript"
 	],
-	"homepage": "https://github.com/orkestrel/reason#readme",
-	"bugs": "https://github.com/orkestrel/reason/issues",
+	"homepage": "https://github.com/orkestrel/pool#readme",
+	"bugs": "https://github.com/orkestrel/pool/issues",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/orkestrel/reason.git"
+		"url": "git+https://github.com/orkestrel/pool.git"
 	},
 	"files": [
 		"dist",
@@ -63,7 +62,6 @@
 		"prepublishOnly": "npm run format:check && npm run lint:check && npm run check && npm run check:src && npm run build && npm test"
 	},
 	"dependencies": {
-		"@orkestrel/contract": "^0.0.1",
 		"@orkestrel/emitter": "^0.0.1"
 	},
 	"devDependencies": {

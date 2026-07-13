@@ -1,6 +1,6 @@
-import type { EmitterInterface } from '../emitters/types.js'
+import type { EmitterInterface } from '@orkestrel/emitter'
 import type { PoolEventMap, PoolInterface, PoolOptions, PoolToken, PoolWaiter } from './types.js'
-import { Emitter } from '../emitters/Emitter.js'
+import { Emitter } from '@orkestrel/emitter'
 
 /**
  * A bounded resource pool with idle reuse + FIFO waiting.
@@ -26,7 +26,7 @@ import { Emitter } from '../emitters/Emitter.js'
  * - **Abort-cancellable waiting.** A parked `acquire` given an `AbortSignal` rejects
  *   when that signal fires and removes its waiter from the queue — no leaked waiter, so
  *   a later `release` still serves the next live waiter. The signal is supplied by the
- *   caller (the Worker passes the per-attempt execution signal); the pool adds no abort
+ *   caller (a worker, for example, passes its per-attempt execution signal); the pool adds no abort
  *   of its own.
  * - **Counts.** `size` = idle + leased; `idle` = available now; `active` = leased out.
  * - **Teardown.** `clear` destroys every IDLE resource (leased ones keep running);

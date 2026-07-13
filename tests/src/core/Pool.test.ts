@@ -7,7 +7,7 @@ import {
 	createResourceFactory,
 	recordEmitterEvents,
 	waitForDelay,
-} from '../../../setup.js'
+} from '../../setup.js'
 
 // src/core/workers/Pool.ts — the bounded resource pool. Real behaviour, no mocks:
 // `create` hands out monotonically-numbered resources via a recorder so the test can
