@@ -62,7 +62,10 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#destroy = options.destroy
 		this.#validate = options.validate
 		this.#max = Math.max(1, options.max ?? Number.POSITIVE_INFINITY)
-		this.#emitter = new Emitter<PoolEventMap>({ on: options?.on, error: options?.error })
+		this.#emitter = new Emitter<PoolEventMap>({
+			...(options.on !== undefined ? { on: options.on } : {}),
+			...(options.error !== undefined ? { error: options.error } : {}),
+		})
 	}
 
 	get emitter(): EmitterInterface<PoolEventMap> {
@@ -166,30 +169,41 @@ export class Pool<T> implements PoolInterface<T> {
 	// abort on `signal` rejects the acquire and removes its waiter (no leak).
 	#wait(signal: AbortSignal | undefined): Promise<PoolToken<T>> {
 		return new Promise<PoolToken<T>>((resolve, reject) => {
-			const waiter: PoolWaiter<T> = { resolve, reject, clear: () => {} }
+			const waiter: PoolWaiter<T> = { resolve, reject, clear: this.#ignore }
 			this.#waiters.push(waiter)
 			if (signal !== undefined) {
-				const onAbort = (): void => {
-					const index = this.#waiters.indexOf(waiter)
-					if (index >= 0) this.#waiters.splice(index, 1)
-					reject(signal.reason)
-				}
+				const onAbort = this.#createAbort(signal, waiter)
 				signal.addEventListener('abort', onAbort, { once: true })
-				waiter.clear = (): void => signal.removeEventListener('abort', onAbort)
+				waiter.clear = this.#createClear(signal, onAbort)
 			}
 		})
 	}
 
 	// Build an idempotent token; its `release` returns the resource exactly once.
 	#token(resource: T): PoolToken<T> {
+		return { value: resource, release: this.#createRelease(resource) }
+	}
+
+	#ignore(): void {}
+
+	#createAbort(signal: AbortSignal, waiter: PoolWaiter<T>): () => void {
+		return (): void => {
+			const index = this.#waiters.indexOf(waiter)
+			if (index >= 0) this.#waiters.splice(index, 1)
+			waiter.reject(signal.reason)
+		}
+	}
+
+	#createClear(signal: AbortSignal, onAbort: () => void): () => void {
+		return (): void => signal.removeEventListener('abort', onAbort)
+	}
+
+	#createRelease(resource: T): () => void {
 		let released = false
-		return {
-			value: resource,
-			release: (): void => {
-				if (released) return
-				released = true
-				this.#return(resource)
-			},
+		return (): void => {
+			if (released) return
+			released = true
+			this.#return(resource)
 		}
 	}
 
