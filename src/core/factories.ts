@@ -2,24 +2,20 @@ import type { PoolInterface, PoolOptions } from './types.js'
 import { Pool } from './Pool.js'
 
 /**
- * Create a bounded resource pool with idle reuse and FIFO waiting — `acquire` leases a
- * resource (reusing a validated idle one, growing up to `max`, or parking until a
- * `release` frees one) and the returned token's `release` returns it for reuse.
+ * Create a resource pool with optional bounded capacity, unique ownership, and FIFO settlement.
  *
  * @remarks
- * A parked `acquire` given an `AbortSignal` rejects + de-queues itself when the signal
- * fires (no leaked waiter). `clear` destroys idle resources (leased ones keep running);
- * `destroy` destroys all and rejects waiters. The pool is lean — no warm-floor (`min`),
- * no eviction timers — and observable (§13): a typed `emitter` surfaces
- * `create` / `acquire` / `release` / `destroy`.
+ * Concurrent create and validation hooks may overlap, while acquire promises settle in
+ * request order. `clear` owns its idle snapshot; `destroy` returns one stable barrier and
+ * waits for every in-flight hook and cleanup before destroying the emitter last.
  *
  * @typeParam T - The pooled resource type
- * @param options - The `create` hook plus optional `destroy` / `validate` / `max`
+ * @param options - Lifecycle hooks, optional positive safe `max`, and observation hooks
  * @returns A working {@link PoolInterface}
  *
  * @example
  * ```ts
- * import { createPool } from '@src/core'
+ * import { createPool } from '@orkestrel/pool'
  *
  * const pool = createPool<Connection>({
  * 	create: () => connect(),

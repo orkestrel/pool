@@ -1,78 +1,57 @@
 import type { EmitterErrorHandler, EmitterHooks, EmitterInterface } from '@orkestrel/emitter'
 
-/**
- * The push observation surface of a {@link PoolInterface} (AGENTS §13) — the resource
- * lifecycle moments a fire-and-forget observer subscribes to.
- *
- * @remarks
- * Pure signals (no `T` payload — `Pool<T>` carries no resource value on its events, so a
- * non-generic map stays lean). Listener isolation is the emitter's (AGENTS §13): every event
- * is emitted directly and a listener throw is routed to the emitter's `error` handler (the
- * `error` option), never onto this map, and sits AFTER the relevant create / acquire /
- * release / destroy transition — so a throwing observer can never corrupt the FIFO
- * handoff-eviction machinery (it cannot strand a parked waiter or unbalance the lease count).
- * Subscribe via `pool.emitter.on(...)`. Declared as a `type` alias (§4.5 — `EventMap` is a
- * `type` kind).
- */
+/** Machine-readable failure codes produced by {@link PoolError}. */
+export type PoolCode = 'invalid' | 'destroyed' | 'create' | 'cleanup'
+
+/** Structured context attached to a {@link PoolError}. */
+export interface PoolContext {
+	/** The rejected public input, when the failure is an input-validation error. */
+	readonly value?: unknown
+	/** Distinct cleanup failures collected by `clear()` or `destroy()`. */
+	readonly failures?: readonly unknown[]
+}
+
+/** Construction options for {@link PoolError}. */
+export interface PoolErrorOptions {
+	/** The stable machine-readable failure category. */
+	readonly code: PoolCode
+	/** The original thrown value, retained without unsafe string coercion. */
+	readonly cause?: unknown
+	/** Optional structured failure details. */
+	readonly context?: PoolContext
+}
+
+/** Observable resource lifecycle events emitted by a {@link PoolInterface}. */
 export type PoolEventMap = {
-	/** A fresh resource was created (`create` resolved) and leased. */
+	/** A created resource entered pool ownership. */
 	readonly create: readonly []
-	/** A token was handed to a lessee (a reused idle one, a fresh one, or a served waiter). */
+	/** A token settled successfully and its exact resource became leased. */
 	readonly acquire: readonly []
-	/** A leased resource returned to idle (no waiter was parked). */
+	/** A released resource became immediately idle. */
 	readonly release: readonly []
-	/** A resource was destroyed (`clear` / `destroy`, or a failed `validate`). */
+	/** A resource cleanup hook completed or was attempted when absent. */
 	readonly destroy: readonly []
 }
 
-/**
- * A leased resource from a {@link PoolInterface} — `value` is the live resource and
- * `release()` returns it to the pool for reuse (or hands it to the next waiter).
- */
+/** A unique lease over one pool-owned resource record. */
 export interface PoolToken<T> {
-	/** The leased resource. */
+	/** The leased value. Duplicate values still belong to independent records. */
 	readonly value: T
-	/** Return the resource to the pool; calling more than once is a no-op. */
+	/** Return this exact lease once; subsequent calls are no-ops. */
 	release(): void
 }
 
 /**
- * A parked acquirer on a {@link PoolInterface}'s FIFO waiter list — its promise resolvers
- * plus the cleanup that detaches its abort listener.
+ * Resource lifecycle options for {@link Pool} and `createPool`.
  *
  * @remarks
- * Held only inside the {@link PoolInterface} engine (a resource at `max` parks the acquirer
- * here until a `release` hands it a token); not part of the public call surface, but
- * centralized here per AGENTS §5. `resolve` hands the waiter its leased {@link PoolToken};
- * `reject` fails its `acquire` (a teardown or an aborted wait); `clear` detaches the abort
- * listener so a settled waiter leaks nothing.
- *
- * @typeParam T - The resource the pool leases
- */
-export interface PoolWaiter<T> {
-	readonly resolve: (token: PoolToken<T>) => void
-	readonly reject: (error: unknown) => void
-	clear(): void
-}
-
-/**
- * Options for `createPool` — the resource lifecycle hooks.
- *
- * @remarks
- * - `create` — make a fresh resource; called when no idle resource is reusable and
- *   the pool is below `max`. May be async.
- * - `destroy` — tear a resource down when the pool drops it (`clear` / `destroy`, or
- *   a failed `validate`); optional and awaited.
- * - `validate` — check an idle resource is still usable before leasing it; an invalid
- *   resource is destroyed and replaced. Optional (an absent validator trusts idle).
- * - `max` — the most resources that may exist at once (idle + leased); defaults to
- *   unbounded. A surplus `acquire` waits (FIFO) for a `release`.
- * - `on` — the reserved {@link EmitterHooks} key (§8): initial listeners for the pool's
- *   {@link PoolEventMap}, wired at construction (e.g. `{ create: () => count() }`).
+ * `create` lazily produces resources. `destroy` tears down a claimed resource.
+ * `validate` checks a previously owned resource before reuse. `max` is a positive
+ * safe integer; omission is the only unbounded form. `on` installs initial emitter
+ * listeners and `error` receives isolated listener failures.
  */
 export interface PoolOptions<T> {
 	readonly on?: EmitterHooks<PoolEventMap>
-	/** The emitter's listener-error handler (AGENTS §13) — a listener throw routes here, not to a domain event. */
 	readonly error?: EmitterErrorHandler
 	readonly create: () => Promise<T> | T
 	readonly destroy?: (value: T) => Promise<void> | void
@@ -80,22 +59,33 @@ export interface PoolOptions<T> {
 	readonly max?: number
 }
 
-/**
- * A bounded resource pool with idle reuse + FIFO waiting.
- *
- * @remarks
- * Exposes a typed {@link emitter} (AGENTS §13) carrying its resource lifecycle moments
- * ({@link PoolEventMap}) for fire-and-forget observers. Emitting is observation-only —
- * every event fires AFTER the relevant create / acquire / release / destroy transition, so a
- * buggy observer can never corrupt the FIFO handoff-eviction machinery: the emitter isolates
- * a listener throw and routes it to its `error` handler (the `error` option), never the pool.
- */
+/** A FIFO resource pool with optional bounded capacity and deterministic teardown. */
 export interface PoolInterface<T> {
+	/** The typed synchronous lifecycle observation surface. */
 	readonly emitter: EmitterInterface<PoolEventMap>
+	/** All owned records, including records validating or destroying. */
 	readonly size: number
+	/** Records immediately available without validation work. */
 	readonly idle: number
+	/** Records represented by unsettled released-once lease tokens. */
 	readonly active: number
+	/**
+	 * Queue and lease one resource in FIFO settlement order.
+	 *
+	 * @param signal - Optional native cancellation signal
+	 * @returns A promise for the unique resource lease
+	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>>
+	/**
+	 * Destroy the records that are idle at this call's synchronous snapshot.
+	 *
+	 * @returns A promise that settles after every snapshot cleanup attempt
+	 */
 	clear(): Promise<void>
+	/**
+	 * Permanently tear down the pool and return its stable completion barrier.
+	 *
+	 * @returns The exact promise shared by every destroy call
+	 */
 	destroy(): Promise<void>
 }

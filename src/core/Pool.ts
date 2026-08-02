@@ -1,320 +1,564 @@
 import type { EmitterInterface } from '@orkestrel/emitter'
-import type { PoolEventMap, PoolInterface, PoolOptions, PoolToken, PoolWaiter } from './types.js'
+import type { PoolCode, PoolEventMap, PoolInterface, PoolOptions, PoolToken } from './types.js'
 import { Emitter } from '@orkestrel/emitter'
+import { PoolError } from './errors.js'
+import { isPoolMax, isPoolSignal } from './validators.js'
 
 /**
- * A bounded resource pool with idle reuse + FIFO waiting.
+ * A capacity-aware resource pool whose opaque ownership records preserve FIFO settlement,
+ * cancellation, exact lease release, and deterministic teardown under concurrent hooks.
  *
- * @remarks
- * - **Idle reuse.** `acquire` first takes an idle resource (validating it when a
- *   `validate` hook is set — an invalid one is destroyed and the next idle / a fresh
- *   one is tried). When no usable idle resource exists and the pool is below `max`, it
- *   `create`s a new one. At `max` with none idle, the acquire PARKS on a FIFO waiter
- *   list until a `release` hands it a resource.
- * - **FIFO handoff (validated).** `release` (on the token) hands the resource to the next
- *   parked waiter (oldest first) — the resource stays leased, the lessee just changes —
- *   or returns it to idle when no one is waiting. With a waiter parked the resource is
- *   re-validated first (the same `validate` hook the idle path uses), so a resource that
- *   went invalid WHILE leased (e.g. a terminated worker thread) is destroyed and the
- *   waiter is served a fresh/valid one instead — a dead resource is never handed on. The
- *   no-waiter path stays synchronous; releasing the same token twice is a no-op (an
- *   idempotent token guard).
- * - **`validate` is total.** A `validate` hook that THROWS is treated exactly like one
- *   returning `false` — the resource is "not usable", so it is destroyed and replaced —
- *   rather than escaping. This holds on both the idle reuse and the FIFO handoff paths, so
- *   a throwing validator can never strand a parked waiter on an unhandled rejection.
- * - **Abort-cancellable waiting.** A parked `acquire` given an `AbortSignal` rejects
- *   when that signal fires and removes its waiter from the queue — no leaked waiter, so
- *   a later `release` still serves the next live waiter. The signal is supplied by the
- *   caller (a worker, for example, passes its per-attempt execution signal); the pool adds no abort
- *   of its own.
- * - **Counts.** `size` = idle + leased; `idle` = available now; `active` = leased out.
- * - **Teardown.** `clear` destroys every IDLE resource (leased ones keep running);
- *   `destroy` destroys ALL resources and rejects any parked waiters. Both await the
- *   `destroy` hook.
- * - **Observable (§13).** The owned {@link emitter} ({@link PoolEventMap}) carries the
- *   resource lifecycle — `create` / `acquire` / `release` / `destroy` — for fire-and-forget
- *   observers. Every event is emitted directly, strictly AFTER the relevant transition —
- *   OUTSIDE the `#handoff` / `#serve` await-chain, never across a waiter's resolve; the
- *   emitter isolates a listener throw and routes it to its `error` handler (the `error`
- *   option), so a buggy observer can NEVER corrupt the validated FIFO handoff-eviction
- *   machinery (it cannot strand a parked waiter or unbalance the lease count). Observation is
- *   purely a side-channel.
- * - **De-bloated.** No warm-floor / `min`, no eviction timers — lean.
+ * @typeParam T - The pooled resource value
+ *
+ * @example
+ * ```ts
+ * import { Pool } from '@orkestrel/pool'
+ *
+ * const pool = new Pool({ create: () => new Uint8Array(64), max: 2 })
+ * const token = await pool.acquire()
+ * try {
+ * 	consume(token.value)
+ * } finally {
+ * 	token.release()
+ * }
+ * await pool.destroy()
+ * ```
  */
 export class Pool<T> implements PoolInterface<T> {
 	readonly #create: () => Promise<T> | T
-	readonly #destroy: ((value: T) => Promise<void> | void) | undefined
+	readonly #cleanup: ((value: T) => Promise<void> | void) | undefined
 	readonly #validate: ((value: T) => Promise<boolean> | boolean) | undefined
-	readonly #max: number
-	// The PUSH observation surface (§13) — owned, never inherited. The emitter isolates a
-	// listener throw (routing it to the `error` handler), so it can never escape into the
-	// validated FIFO handoff-eviction path.
+	readonly #max: number | undefined
 	readonly #emitter: Emitter<PoolEventMap>
+	readonly #resources = new Map<object, T>()
+	readonly #available: object[] = []
+	readonly #validating = new Set<object>()
+	readonly #leased = new Set<object>()
+	readonly #readyRecords = new Set<object>()
+	readonly #destroying = new Map<object, Promise<void>>()
+	readonly #waiters: PromiseWithResolvers<PoolToken<T>>[] = []
+	readonly #assigned = new Set<PromiseWithResolvers<PoolToken<T>>>()
+	readonly #reservations = new Set<PromiseWithResolvers<PoolToken<T>>>()
+	readonly #signals = new Map<
+		PromiseWithResolvers<PoolToken<T>>,
+		{ readonly signal: AbortSignal; readonly listener: () => void }
+	>()
+	readonly #ready = new Map<
+		PromiseWithResolvers<PoolToken<T>>,
+		| { readonly success: true; readonly record: object; readonly token: PoolToken<T> }
+		| { readonly success: false; readonly error: unknown }
+	>()
+	readonly #operations = new Set<Promise<void>>()
+	readonly #owned = new Set<Promise<void>>()
+	readonly #failures: unknown[] = []
+	#ending: PromiseWithResolvers<void> | undefined
+	#pumping = false
+	#repump = false
 
-	readonly #idle: T[] = []
-	readonly #waiters: PoolWaiter<T>[] = []
-	#active = 0
-	#destroyed = false
-
+	/**
+	 * Construct a pool and synchronously validate its capacity contract.
+	 *
+	 * @param options - Resource hooks, observation hooks, and optional positive safe `max`
+	 */
 	constructor(options: PoolOptions<T>) {
+		if (options.max !== undefined && !isPoolMax(options.max)) {
+			throw new PoolError({ code: 'invalid', context: { value: options.max } })
+		}
 		this.#create = options.create
-		this.#destroy = options.destroy
+		this.#cleanup = options.destroy
 		this.#validate = options.validate
-		this.#max = Math.max(1, options.max ?? Number.POSITIVE_INFINITY)
-		this.#emitter = new Emitter<PoolEventMap>({
-			...(options.on !== undefined ? { on: options.on } : {}),
-			...(options.error !== undefined ? { error: options.error } : {}),
+		this.#max = options.max
+		this.#emitter = new Emitter({
+			...(options.on === undefined ? {} : { on: options.on }),
+			...(options.error === undefined ? {} : { error: options.error }),
 		})
 	}
 
+	/** The typed synchronous lifecycle observation surface. */
 	get emitter(): EmitterInterface<PoolEventMap> {
 		return this.#emitter
 	}
 
+	/** All owned records, including records validating or destroying. */
 	get size(): number {
-		return this.#idle.length + this.#active
+		return this.#resources.size
 	}
 
+	/** Records immediately available without validation work. */
 	get idle(): number {
-		return this.#idle.length
+		return this.#available.length
 	}
 
+	/** Records represented by unsettled released-once lease tokens. */
 	get active(): number {
-		return this.#active
+		return this.#leased.size
 	}
 
-	async acquire(signal?: AbortSignal): Promise<PoolToken<T>> {
-		if (this.#destroyed) throw new Error('pool is destroyed')
-		if (signal?.aborted === true) throw signal.reason
-		// Reuse a validated idle resource if one is available.
-		const reused = await this.#reuse()
-		if (reused !== undefined) {
-			// Observe the lease — AFTER `#reuse` resolved the token (the resource is already
-			// leased; emit only OBSERVES it).
-			this.#emitter.emit('acquire')
-			return reused
+	/**
+	 * Queue and lease one resource in FIFO settlement order.
+	 *
+	 * @param signal - Optional native cancellation signal
+	 * @returns A promise for the unique resource lease
+	 */
+	acquire(signal?: AbortSignal): Promise<PoolToken<T>> {
+		if (signal !== undefined && !isPoolSignal(signal)) {
+			throw new PoolError({ code: 'invalid', context: { value: signal } })
 		}
-		// Otherwise grow the pool when below the cap.
-		if (this.size < this.#max) {
-			const grown = await this.#grow()
-			// Observe the lease — AFTER `#grow` resolved the fresh token.
-			this.#emitter.emit('acquire')
-			return grown
+		if (this.#ending !== undefined) return Promise.reject(new PoolError({ code: 'destroyed' }))
+		if (signal !== undefined) {
+			const state = this.#state(signal)
+			if (state[0]) return Promise.reject(state[1])
 		}
-		// At capacity with nothing idle — park until a release hands us a resource. The
-		// `acquire` for THIS lease is emitted by `#serve` once a `release` hands it a resource
-		// (after `waiter.resolve`), NOT here — so a served waiter emits `acquire` exactly once.
-		return await this.#wait(signal)
+
+		const waiter = Promise.withResolvers<PoolToken<T>>()
+		this.#waiters.push(waiter)
+		if (signal !== undefined) {
+			const listener = this.#createAbort(waiter, signal)
+			AbortSignal.prototype.addEventListener.call(signal, 'abort', listener, { once: true })
+			this.#signals.set(waiter, { signal, listener })
+			const state = this.#state(signal)
+			if (state[0]) this.#abort(waiter, state[1])
+		}
+		this.#pump()
+		return waiter.promise
 	}
 
-	async clear(): Promise<void> {
-		const resources = this.#idle.splice(0)
-		await Promise.all(resources.map((resource) => this.#release(resource)))
+	/**
+	 * Destroy the records that are idle at this call's synchronous snapshot.
+	 *
+	 * @returns A promise that settles after every snapshot cleanup attempt
+	 */
+	clear(): Promise<void> {
+		if (this.#ending !== undefined) return Promise.reject(new PoolError({ code: 'destroyed' }))
+		const records = this.#available.splice(0)
+		const cleanups: Promise<void>[] = []
+		for (const record of records) cleanups.push(this.#dispose(record))
+		return this.#settleClear(cleanups)
 	}
 
-	async destroy(): Promise<void> {
-		if (this.#destroyed) return
-		this.#destroyed = true
+	/**
+	 * Permanently tear down the pool and return its stable completion barrier.
+	 *
+	 * @returns The exact promise shared by every destroy call
+	 */
+	destroy(): Promise<void> {
+		if (this.#ending !== undefined) return this.#ending.promise
+
+		const ending = Promise.withResolvers<void>()
+		this.#ending = ending
 		const waiters = this.#waiters.splice(0)
-		const error = new Error('pool is destroyed')
 		for (const waiter of waiters) {
-			waiter.clear()
-			waiter.reject(error)
+			this.#detach(waiter)
+			waiter.reject(new PoolError({ code: 'destroyed' }))
 		}
-		const resources = this.#idle.splice(0)
-		await Promise.all(resources.map((resource) => this.#release(resource)))
-	}
-
-	// Take + validate the next idle resource; destroy + skip invalid ones. Returns a
-	// token for the first valid idle resource, or `undefined` when none is usable.
-	async #reuse(): Promise<PoolToken<T> | undefined> {
-		while (this.#idle.length > 0) {
-			const resource = this.#idle.shift()
-			if (resource === undefined) continue
-			if (await this.#valid(resource)) {
-				this.#active += 1
-				return this.#token(resource)
-			}
-			await this.#release(resource)
+		this.#ready.clear()
+		this.#assigned.clear()
+		this.#available.splice(0)
+		for (const cleanup of this.#destroying.values()) this.#own(cleanup)
+		for (const record of this.#resources.keys()) {
+			if (!this.#validating.has(record)) this.#own(this.#dispose(record))
 		}
-		return undefined
+		this.#finish()
+		return ending.promise
 	}
 
-	// Create a fresh resource and lease it. Reserve the active slot before awaiting
-	// `create` so a concurrent acquire sees the pool at capacity (no overshoot of `max`).
-	async #grow(): Promise<PoolToken<T>> {
-		this.#active += 1
-		let resource: T
-		try {
-			resource = await this.#create()
-		} catch (error: unknown) {
-			this.#active -= 1
-			throw error instanceof Error ? error : new Error(String(error))
-		}
-		// The pool may have been destroyed during `create` — never hand a live resource into
-		// a torn-down pool. Free the active slot, destroy the just-created resource, and throw.
-		if (this.#destroyed) {
-			this.#active -= 1
-			await this.#release(resource)
-			throw new Error('pool is destroyed')
-		}
-		// Observe the fresh resource — AFTER `create` resolved and the not-destroyed re-check
-		// passed (the resource is here to stay), BEFORE the token is built.
-		this.#emitter.emit('create')
-		return this.#token(resource)
-	}
-
-	// Park a resolver on the FIFO waiter list until a release hands it a resource; an
-	// abort on `signal` rejects the acquire and removes its waiter (no leak).
-	#wait(signal: AbortSignal | undefined): Promise<PoolToken<T>> {
-		return new Promise<PoolToken<T>>((resolve, reject) => {
-			const waiter: PoolWaiter<T> = { resolve, reject, clear: this.#ignore }
-			this.#waiters.push(waiter)
-			if (signal !== undefined) {
-				const onAbort = this.#createAbort(signal, waiter)
-				signal.addEventListener('abort', onAbort, { once: true })
-				waiter.clear = this.#createClear(signal, onAbort)
-			}
-		})
-	}
-
-	// Build an idempotent token; its `release` returns the resource exactly once.
-	#token(resource: T): PoolToken<T> {
-		return { value: resource, release: this.#createRelease(resource) }
-	}
-
-	#ignore(): void {}
-
-	#createAbort(signal: AbortSignal, waiter: PoolWaiter<T>): () => void {
+	#createAbort(waiter: PromiseWithResolvers<PoolToken<T>>, signal: AbortSignal): () => void {
 		return (): void => {
-			const index = this.#waiters.indexOf(waiter)
-			if (index >= 0) this.#waiters.splice(index, 1)
-			waiter.reject(signal.reason)
+			let reason: unknown
+			try {
+				reason = this.#state(signal)[1]
+			} catch (error: unknown) {
+				reason = error
+			}
+			this.#abort(waiter, reason)
 		}
 	}
 
-	#createClear(signal: AbortSignal, onAbort: () => void): () => void {
-		return (): void => signal.removeEventListener('abort', onAbort)
+	#state(signal: AbortSignal): readonly [aborted: boolean, reason: unknown] {
+		const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get
+		const reason = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'reason')?.get
+		if (aborted === undefined || reason === undefined) {
+			throw new PoolError({ code: 'invalid', context: { value: signal } })
+		}
+		try {
+			const stopped = Reflect.apply(aborted, signal, []) === true
+			return [stopped, stopped ? Reflect.apply(reason, signal, []) : undefined]
+		} catch (error: unknown) {
+			throw new PoolError({ code: 'invalid', cause: error, context: { value: signal } })
+		}
 	}
 
-	#createRelease(resource: T): () => void {
+	#createRelease(record: object): () => void {
 		let released = false
 		return (): void => {
 			if (released) return
 			released = true
-			this.#return(resource)
+			this.#release(record)
 		}
 	}
 
-	// Return a leased resource. No waiter parked → synchronously drop it to idle (or destroy
-	// it if torn down), `#active -= 1`. A waiter IS parked → hand off asynchronously, after
-	// re-validating the resource so an invalid one (e.g. a terminated thread) is never served.
-	#return(resource: T): void {
-		if (this.#waiters.length === 0) {
-			this.#active -= 1
-			if (this.#destroyed) {
-				void this.#release(resource)
+	#token(record: object, value: T): PoolToken<T> {
+		return { value, release: this.#createRelease(record) }
+	}
+
+	#abort(waiter: PromiseWithResolvers<PoolToken<T>>, reason: unknown): void {
+		const index = this.#waiters.indexOf(waiter)
+		if (index < 0) return
+		this.#waiters.splice(index, 1)
+		this.#detach(waiter)
+		const ready = this.#ready.get(waiter)
+		this.#ready.delete(waiter)
+		this.#assigned.delete(waiter)
+		if (ready?.success === true) {
+			this.#readyRecords.delete(ready.record)
+			this.#recycle(ready.record)
+		}
+		waiter.reject(reason)
+		this.#commit()
+		this.#pump()
+	}
+
+	#detach(waiter: PromiseWithResolvers<PoolToken<T>>): void {
+		const entry = this.#signals.get(waiter)
+		if (entry === undefined) return
+		AbortSignal.prototype.removeEventListener.call(entry.signal, 'abort', entry.listener)
+		this.#signals.delete(waiter)
+	}
+
+	#pump(): void {
+		if (this.#ending !== undefined) return
+		if (this.#pumping) {
+			this.#repump = true
+			return
+		}
+
+		this.#pumping = true
+		do {
+			this.#repump = false
+			for (const waiter of this.#waiters) {
+				if (this.#assigned.has(waiter) || this.#ready.has(waiter)) continue
+				const record = this.#available.shift()
+				if (record !== undefined) {
+					this.#assigned.add(waiter)
+					this.#validating.add(record)
+					this.#startValidation(waiter, record)
+					continue
+				}
+				if (this.#max === undefined || this.#resources.size + this.#reservations.size < this.#max) {
+					this.#assigned.add(waiter)
+					this.#reservations.add(waiter)
+					this.#startCreate(waiter)
+					continue
+				}
+				break
+			}
+		} while (this.#repump)
+		this.#pumping = false
+	}
+
+	#startCreate(waiter: PromiseWithResolvers<PoolToken<T>>): void {
+		const operation = Promise.resolve().then(() => this.#createResource(waiter))
+		this.#operations.add(operation)
+		void operation.then(
+			() => this.#completeOperation(operation),
+			(error: unknown) => this.#failOperation(operation, waiter, error, 'create'),
+		)
+	}
+
+	#startValidation(waiter: PromiseWithResolvers<PoolToken<T>>, record: object): void {
+		for (const [owned, value] of this.#resources) {
+			if (owned !== record) continue
+			if (this.#validate === undefined) {
+				this.#validating.delete(record)
+				this.#prepare(waiter, record, value)
 				return
 			}
-			this.#idle.push(resource)
-			// Observe the resource dropping to idle — AFTER `#active` was balanced down and it
-			// is back on the idle list (the synchronous no-waiter path). A waiter-handoff
-			// instead keeps the resource LEASED, so it emits no `release` here.
-			this.#emitter.emit('release')
+			const operation = Promise.resolve().then(() => this.#validateResource(waiter, record, value))
+			this.#operations.add(operation)
+			void operation.then(
+				() => this.#completeOperation(operation),
+				(error: unknown) => this.#failOperation(operation, waiter, error, 'invalid'),
+			)
 			return
 		}
-		void this.#handoff(resource)
+		this.#validating.delete(record)
+		this.#assigned.delete(waiter)
+		this.#repump = true
 	}
 
-	// Hand a released resource to the oldest parked waiter, re-validating it first. A VALID
-	// resource is served as-is (it stays leased — `#active` unchanged). An INVALID one is
-	// destroyed and the waiter is served a fresh resource that REUSES the dead one's `#active`
-	// slot (the count never dips below the lease, so a concurrent acquire can't overshoot
-	// `max`). The waiter is re-shifted after every `await` (the queue can change underneath
-	// us), and the pool is re-checked for teardown — so no waiter is leaked or double-settled
-	// and no resource is handed into a destroyed pool.
-	async #handoff(resource: T): Promise<void> {
-		// VALID release → serve the released resource directly (the common, unchanged path).
-		if (await this.#valid(resource)) {
-			this.#serve(resource)
-			return
-		}
-		// INVALID release → destroy it and replace it, holding its `#active` slot steady.
-		void this.#release(resource)
-		let replacement: T
+	async #createResource(waiter: PromiseWithResolvers<PoolToken<T>>): Promise<void> {
+		let value: T
 		try {
-			replacement = await this.#create()
+			value = await this.#create()
 		} catch (error: unknown) {
-			// The dead resource cannot be replaced — free its slot and reject the oldest waiter
-			// (it can't be served), or drop the error if the queue raced empty.
-			this.#active -= 1
-			const waiter = this.#waiters.shift()
-			waiter?.clear()
-			waiter?.reject(error instanceof Error ? error : new Error(String(error)))
+			this.#reservations.delete(waiter)
+			if (this.#waiters.includes(waiter)) {
+				this.#ready.set(waiter, {
+					success: false,
+					error: new PoolError({ code: 'create', cause: error }),
+				})
+			} else {
+				this.#assigned.delete(waiter)
+			}
+			this.#commit()
 			return
 		}
-		// Observe the fresh replacement — AFTER `create` resolved, BEFORE it is served.
+
+		this.#reservations.delete(waiter)
+		const record = {}
+		this.#resources.set(record, value)
+		this.#readyRecords.add(record)
 		this.#emitter.emit('create')
-		this.#serve(replacement)
+		if (this.#ending !== undefined) {
+			this.#readyRecords.delete(record)
+			this.#assigned.delete(waiter)
+			try {
+				await this.#dispose(record)
+			} catch {}
+			return
+		}
+		if (!this.#waiters.includes(waiter)) {
+			this.#readyRecords.delete(record)
+			this.#assigned.delete(waiter)
+			this.#recycle(record)
+			return
+		}
+		this.#ready.set(waiter, {
+			success: true,
+			record,
+			token: this.#token(record, value),
+		})
+		this.#commit()
 	}
 
-	// Hand a validated resource (the released one, or its fresh replacement) to the oldest
-	// live waiter, holding its `#active` slot. If the queue raced empty across the awaits, the
-	// resource is idle (or destroyed when torn down) and its slot is freed.
-	#serve(resource: T): void {
-		const waiter = this.#destroyed ? undefined : this.#waiters.shift()
-		if (waiter !== undefined) {
-			waiter.clear()
-			waiter.resolve(this.#token(resource))
-			// Observe the served-waiter lease — strictly AFTER `waiter.resolve(...)` (the token
-			// is already handed off; the emit only OBSERVES it and cannot sit across the resolve
-			// or perturb the served acquirer's continuation). This is the `acquire` for a parked
-			// `acquire`, so the public `acquire` deliberately does NOT emit on its `#wait` branch.
+	async #validateResource(
+		waiter: PromiseWithResolvers<PoolToken<T>>,
+		record: object,
+		value: T,
+	): Promise<void> {
+		let valid = false
+		try {
+			valid = (await this.#validate?.(value)) === true
+		} catch {}
+		this.#validating.delete(record)
+
+		if (this.#ending !== undefined) {
+			this.#assigned.delete(waiter)
+			try {
+				await this.#dispose(record)
+			} catch {}
+			return
+		}
+		if (!this.#waiters.includes(waiter)) {
+			this.#assigned.delete(waiter)
+			if (valid) this.#recycle(record)
+			else {
+				try {
+					await this.#dispose(record)
+				} catch (error: unknown) {
+					this.#record(error)
+				}
+			}
+			return
+		}
+		if (valid) {
+			this.#prepare(waiter, record, value)
+			return
+		}
+
+		try {
+			await this.#dispose(record)
+		} catch (error: unknown) {
+			if (this.#waiters.includes(waiter)) {
+				this.#ready.set(waiter, {
+					success: false,
+					error: new PoolError({ code: 'cleanup', cause: error }),
+				})
+				this.#commit()
+				return
+			}
+			this.#record(error)
+		}
+		this.#assigned.delete(waiter)
+		this.#pump()
+	}
+
+	#prepare(waiter: PromiseWithResolvers<PoolToken<T>>, record: object, value: T): void {
+		if (!this.#waiters.includes(waiter) || this.#ending !== undefined) {
+			this.#assigned.delete(waiter)
+			this.#recycle(record)
+			return
+		}
+		this.#readyRecords.add(record)
+		this.#ready.set(waiter, {
+			success: true,
+			record,
+			token: this.#token(record, value),
+		})
+		this.#commit()
+	}
+
+	#commit(): void {
+		while (this.#ending === undefined) {
+			const waiter = this.#waiters[0]
+			if (waiter === undefined) return
+			const result = this.#ready.get(waiter)
+			if (result === undefined) return
+			this.#waiters.shift()
+			this.#ready.delete(waiter)
+			this.#assigned.delete(waiter)
+			this.#detach(waiter)
+			if (!result.success) {
+				waiter.reject(result.error)
+				continue
+			}
+			this.#readyRecords.delete(result.record)
+			this.#leased.add(result.record)
+			waiter.resolve(result.token)
 			this.#emitter.emit('acquire')
-			return
-		}
-		this.#active -= 1
-		if (this.#destroyed) {
-			void this.#release(resource)
-			return
-		}
-		this.#idle.push(resource)
-		// The waiter queue raced empty across the handoff awaits — the resource lands back on
-		// idle instead of being leased. Observe that as a `release` (the return-to-idle that
-		// `#return` would have emitted had no waiter been parked when the token was released).
-		this.#emitter.emit('release')
-	}
-
-	// Is this resource usable? No validator trusts it; otherwise run the hook. A validator
-	// that THROWS is treated exactly like one returning `false` — the resource is "not
-	// usable", so it is destroyed + replaced rather than escaping as an unhandled rejection
-	// that would strand a parked waiter on the handoff path (the same total-function spirit
-	// as a guard, AGENTS §12 / §14). The single gate for both the idle (`#reuse`) and the
-	// handoff (`#handoff`) validation, so the two paths can never diverge.
-	async #valid(resource: T): Promise<boolean> {
-		if (this.#validate === undefined) return true
-		try {
-			return await this.#validate(resource)
-		} catch {
-			return false
 		}
 	}
 
-	// Destroy one resource via the optional hook, swallowing destruction failures. Observe the
-	// drop with a `destroy` event AFTER the hook ran (or after the no-hook drop) — the resource
-	// is gone from the pool either way; a swallowed `destroy`-hook failure still emits (the pool
-	// abandoned it). The emit is the LAST thing here, strictly after the teardown transition.
-	async #release(resource: T): Promise<void> {
-		if (this.#destroy === undefined) {
-			this.#emitter.emit('destroy')
+	#completeOperation(operation: Promise<void>): void {
+		this.#operations.delete(operation)
+		this.#commit()
+		this.#pump()
+		this.#finish()
+	}
+
+	#failOperation(
+		operation: Promise<void>,
+		waiter: PromiseWithResolvers<PoolToken<T>>,
+		error: unknown,
+		code: PoolCode,
+	): void {
+		this.#operations.delete(operation)
+		this.#reservations.delete(waiter)
+		this.#assigned.delete(waiter)
+		if (this.#waiters.includes(waiter)) {
+			this.#ready.set(waiter, { success: false, error: new PoolError({ code, cause: error }) })
+		}
+		this.#commit()
+		this.#pump()
+		this.#finish()
+	}
+
+	#release(record: object): void {
+		if (!this.#leased.delete(record)) return
+		if (this.#ending !== undefined) {
+			this.#own(this.#dispose(record))
 			return
 		}
-		try {
-			await this.#destroy(resource)
-		} catch {
-			// A destroy failure abandons the resource — there is nothing to recover.
+		this.#available.push(record)
+		this.#pump()
+		if (this.#available.includes(record)) this.#emitter.emit('release')
+	}
+
+	#recycle(record: object): void {
+		if (this.#ending !== undefined) {
+			this.#own(this.#dispose(record))
+			return
 		}
+		this.#available.push(record)
+		this.#pump()
+		if (this.#available.includes(record)) this.#emitter.emit('release')
+	}
+
+	#dispose(record: object): Promise<void> {
+		const existing = this.#destroying.get(record)
+		if (existing !== undefined) return existing
+		for (const [owned, value] of this.#resources) {
+			if (owned !== record) continue
+			const cleanup = Promise.withResolvers<void>()
+			this.#destroying.set(record, cleanup.promise)
+			const index = this.#available.indexOf(record)
+			if (index >= 0) this.#available.splice(index, 1)
+			this.#validating.delete(record)
+			this.#leased.delete(record)
+			this.#readyRecords.delete(record)
+			if (this.#ending !== undefined) this.#own(cleanup.promise)
+			void this.#clean(record, value, cleanup)
+			return cleanup.promise
+		}
+		return Promise.resolve()
+	}
+
+	async #clean(record: object, value: T, cleanup: PromiseWithResolvers<void>): Promise<void> {
+		let failure: unknown
+		let failed = false
+		try {
+			await this.#cleanup?.(value)
+		} catch (error: unknown) {
+			failure = error
+			failed = true
+		}
+		this.#resources.delete(record)
 		this.#emitter.emit('destroy')
+		this.#destroying.delete(record)
+		this.#pump()
+		if (failed) cleanup.reject(failure)
+		else cleanup.resolve()
+		this.#finish()
+	}
+
+	async #settleClear(cleanups: readonly Promise<void>[]): Promise<void> {
+		const settled = await Promise.allSettled(cleanups)
+		const failures: unknown[] = []
+		for (const result of settled) {
+			if (
+				result.status === 'rejected' &&
+				!failures.some((failure) => Object.is(failure, result.reason))
+			) {
+				failures.push(result.reason)
+			}
+		}
+		if (failures.length > 0) throw this.#cleanupError(failures)
+	}
+
+	#own(cleanup: Promise<void>): void {
+		if (this.#owned.has(cleanup)) return
+		this.#owned.add(cleanup)
+		void cleanup.then(
+			() => this.#completeCleanup(cleanup),
+			(error: unknown) => this.#failCleanup(cleanup, error),
+		)
+	}
+
+	#completeCleanup(cleanup: Promise<void>): void {
+		this.#owned.delete(cleanup)
+		this.#finish()
+	}
+
+	#failCleanup(cleanup: Promise<void>, error: unknown): void {
+		this.#owned.delete(cleanup)
+		this.#record(error)
+		this.#finish()
+	}
+
+	#record(error: unknown): void {
+		if (!this.#failures.some((failure) => Object.is(failure, error))) this.#failures.push(error)
+	}
+
+	#cleanupError(failures: readonly unknown[]): PoolError {
+		return new PoolError({
+			code: 'cleanup',
+			...(failures[0] === undefined ? {} : { cause: failures[0] }),
+			context: { failures: [...failures] },
+		})
+	}
+
+	#finish(): void {
+		const ending = this.#ending
+		if (ending === undefined || this.#operations.size > 0 || this.#owned.size > 0) return
+		let claimed = false
+		for (const record of this.#resources.keys()) {
+			if (this.#validating.has(record) || this.#destroying.has(record)) continue
+			claimed = true
+			this.#own(this.#dispose(record))
+		}
+		if (claimed || this.#resources.size > 0 || this.#destroying.size > 0) return
+		this.#emitter.destroy()
+		if (this.#failures.length > 0) ending.reject(this.#cleanupError(this.#failures))
+		else ending.resolve()
 	}
 }
