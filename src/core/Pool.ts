@@ -34,7 +34,6 @@ export class Pool<T> implements PoolInterface<T> {
 	readonly #available: object[] = []
 	readonly #validating = new Set<object>()
 	readonly #leased = new Set<object>()
-	readonly #readyRecords = new Set<object>()
 	readonly #destroying = new Map<object, Promise<void>>()
 	readonly #waiters: PromiseWithResolvers<PoolToken<T>>[] = []
 	readonly #assigned = new Set<PromiseWithResolvers<PoolToken<T>>>()
@@ -61,16 +60,19 @@ export class Pool<T> implements PoolInterface<T> {
 	 * @param options - Resource hooks, observation hooks, and optional positive safe `max`
 	 */
 	constructor(options: PoolOptions<T>) {
-		if (options.max !== undefined && !isPoolMax(options.max)) {
-			throw new PoolError({ code: 'invalid', context: { value: options.max } })
+		const max = options.max
+		if (max !== undefined && !isPoolMax(max)) {
+			throw new PoolError({ code: 'invalid', context: { value: max } })
 		}
+		const on = options.on
+		const error = options.error
 		this.#create = options.create
 		this.#cleanup = options.destroy
 		this.#validate = options.validate
-		this.#max = options.max
+		this.#max = max
 		this.#emitter = new Emitter({
-			...(options.on === undefined ? {} : { on: options.on }),
-			...(options.error === undefined ? {} : { error: options.error }),
+			...(on === undefined ? {} : { on }),
+			...(error === undefined ? {} : { error }),
 		})
 	}
 
@@ -132,7 +134,14 @@ export class Pool<T> implements PoolInterface<T> {
 		if (this.#ending !== undefined) return Promise.reject(new PoolError({ code: 'destroyed' }))
 		const records = this.#available.splice(0)
 		const cleanups: Promise<void>[] = []
-		for (const record of records) cleanups.push(this.#dispose(record))
+		for (const record of records) {
+			const cleanup = this.#dispose(record)
+			cleanups.push(cleanup)
+			void cleanup.then(
+				() => this.#pump(),
+				() => this.#pump(),
+			)
+		}
 		return this.#settleClear(cleanups)
 	}
 
@@ -210,7 +219,6 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#ready.delete(waiter)
 		this.#assigned.delete(waiter)
 		if (ready?.success === true) {
-			this.#readyRecords.delete(ready.record)
 			this.#recycle(ready.record)
 		}
 		waiter.reject(reason)
@@ -307,10 +315,8 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#reservations.delete(waiter)
 		const record = {}
 		this.#resources.set(record, value)
-		this.#readyRecords.add(record)
 		this.#emitter.emit('create')
 		if (this.#ending !== undefined) {
-			this.#readyRecords.delete(record)
 			this.#assigned.delete(waiter)
 			try {
 				await this.#dispose(record)
@@ -318,7 +324,6 @@ export class Pool<T> implements PoolInterface<T> {
 			return
 		}
 		if (!this.#waiters.includes(waiter)) {
-			this.#readyRecords.delete(record)
 			this.#assigned.delete(waiter)
 			this.#recycle(record)
 			return
@@ -369,6 +374,7 @@ export class Pool<T> implements PoolInterface<T> {
 		try {
 			await this.#dispose(record)
 		} catch (error: unknown) {
+			this.#assigned.delete(waiter)
 			if (this.#waiters.includes(waiter)) {
 				this.#ready.set(waiter, {
 					success: false,
@@ -378,6 +384,8 @@ export class Pool<T> implements PoolInterface<T> {
 				return
 			}
 			this.#record(error)
+			this.#pump()
+			return
 		}
 		this.#assigned.delete(waiter)
 		this.#pump()
@@ -389,7 +397,6 @@ export class Pool<T> implements PoolInterface<T> {
 			this.#recycle(record)
 			return
 		}
-		this.#readyRecords.add(record)
 		this.#ready.set(waiter, {
 			success: true,
 			record,
@@ -405,6 +412,7 @@ export class Pool<T> implements PoolInterface<T> {
 			const result = this.#ready.get(waiter)
 			if (result === undefined) return
 			this.#waiters.shift()
+			this.#repump = true
 			this.#ready.delete(waiter)
 			this.#assigned.delete(waiter)
 			this.#detach(waiter)
@@ -412,7 +420,6 @@ export class Pool<T> implements PoolInterface<T> {
 				waiter.reject(result.error)
 				continue
 			}
-			this.#readyRecords.delete(result.record)
 			this.#leased.add(result.record)
 			waiter.resolve(result.token)
 			this.#emitter.emit('acquire')
@@ -445,13 +452,7 @@ export class Pool<T> implements PoolInterface<T> {
 
 	#release(record: object): void {
 		if (!this.#leased.delete(record)) return
-		if (this.#ending !== undefined) {
-			this.#own(this.#dispose(record))
-			return
-		}
-		this.#available.push(record)
-		this.#pump()
-		if (this.#available.includes(record)) this.#emitter.emit('release')
+		this.#recycle(record)
 	}
 
 	#recycle(record: object): void {
@@ -475,7 +476,6 @@ export class Pool<T> implements PoolInterface<T> {
 			if (index >= 0) this.#available.splice(index, 1)
 			this.#validating.delete(record)
 			this.#leased.delete(record)
-			this.#readyRecords.delete(record)
 			if (this.#ending !== undefined) this.#own(cleanup.promise)
 			void this.#clean(record, value, cleanup)
 			return cleanup.promise
@@ -484,20 +484,27 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	async #clean(record: object, value: T, cleanup: PromiseWithResolvers<void>): Promise<void> {
+		let attempt: Promise<void>
+		try {
+			attempt = Promise.resolve(this.#cleanup?.(value))
+		} catch (error: unknown) {
+			attempt = Promise.reject(error)
+		}
 		let failure: unknown
 		let failed = false
 		try {
-			await this.#cleanup?.(value)
+			await attempt
 		} catch (error: unknown) {
 			failure = error
 			failed = true
 		}
 		this.#resources.delete(record)
-		this.#emitter.emit('destroy')
-		this.#destroying.delete(record)
-		this.#pump()
 		if (failed) cleanup.reject(failure)
 		else cleanup.resolve()
+		// Cleanup owners must bind outcomes before destroy observers can reenter.
+		await Promise.resolve()
+		this.#emitter.emit('destroy')
+		this.#destroying.delete(record)
 		this.#finish()
 	}
 

@@ -92,7 +92,8 @@ owned records + create reservations <= max
 ```
 
 `max` must be a positive safe integer. Omit it for an unbounded pool; `Infinity`, fractions,
-zero, negative values, and unsafe integers are invalid.
+zero, negative values, and unsafe integers are invalid. Construction snapshots `max` once and
+validates it before retention, then snapshots `on` and `error` once each.
 
 Record phases are disjoint:
 
@@ -104,16 +105,19 @@ create reservation -> ready -> leased -> available -> validating -> ready
 Invalid validation, whether `false` or a thrown value, claims and cleans the record before a
 replacement capacity slot becomes available. Cleanup failure rejects that acquire with
 `PoolError` code `cleanup`; successful cleanup lets the same FIFO waiter seek a replacement.
-A create failure rejects its bound acquire with code `create` and never strands later waiters.
+The bound outcome and replacement eligibility are established before synchronous `destroy`
+observers can reenter acquisition. A create failure rejects its bound acquire with code
+`create` and never strands later waiters.
 
 ### Cancellation
 
-`acquire` validates a native `AbortSignal` before queueing. A pre-aborted signal and every
-later abort preserve the caller's exact `signal.reason`. The listener is attached, recorded,
-and followed by an aborted-state recheck, then detached on every settlement. Aborting while
-create or validation work is assigned removes the waiter exactly once; any late resource is
-returned to the live pump or cleaned during teardown. A ready result waiting behind a slower
-head can likewise be aborted without leaking its record.
+`acquire` validates a native `AbortSignal` before queueing. An invalid signal throws a
+code-`invalid` `PoolError` synchronously instead of returning a rejected promise. A
+pre-aborted signal and every later abort preserve the caller's exact `signal.reason`. The
+listener is attached, recorded, and followed by an aborted-state recheck, then detached on
+every settlement. Aborting while create or validation work is assigned removes the waiter
+exactly once; any late resource is returned to the live pump or cleaned during teardown. A
+ready result waiting behind a slower head can likewise be aborted without leaking its record.
 If cancelled validation later proves the record invalid and its cleanup fails, the acquire
 still preserves the caller's abort reason while the cleanup failure is retained for the
 eventual `destroy()` barrier.
@@ -130,9 +134,9 @@ before invoking the hook. Concurrent clears therefore own disjoint snapshots, an
 released after one snapshot is not part of it. Every claimed record stays in `size` until its
 hook attempt completes. Distinct failures are aggregated in a code-`cleanup` `PoolError`
 whose `context.failures` retains the original thrown values.
-Removing a claimed record releases capacity and wakes queued acquires after the destroy
-ledger transition, whether its cleanup hook succeeded or failed; a failed `clear()` still
-rejects its own cleanup barrier.
+Each claimed record's cleanup settlement independently wakes queued acquires after the
+destroy ledger transition, whether its cleanup hook succeeded or failed; a failed `clear()`
+still rejects its own aggregate cleanup barrier.
 
 ### Destruction
 
@@ -164,15 +168,17 @@ return safely for hostile proxies.
 
 ## Observing
 
-The composed `Emitter` isolates listener throws through the optional `error` handler. Events
-are synchronous and follow their ledger transitions:
+The composed `Emitter` isolates listener throws through the optional `error` handler and
+invokes listeners synchronously at each emission point. The `destroy` emission is deliberately
+one microtask after cleanup settlement so bound outcomes precede observer reentry. Events
+follow their ledger transitions:
 
-| Event     | Emission point                                                        |
-| --------- | --------------------------------------------------------------------- |
-| `create`  | After a fresh resource is inserted into the ownership ledger.         |
-| `acquire` | After the waiter promise receives its token and the record is leased. |
-| `release` | Only when the released or orphaned-ready record remains idle.         |
-| `destroy` | After every cleanup hook attempt and after ledger removal.            |
+| Event     | Emission point                                                                                                                                                      |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `create`  | After a fresh resource is inserted into the ownership ledger.                                                                                                       |
+| `acquire` | After the waiter promise receives its token and the record is leased.                                                                                               |
+| `release` | Only when the released or orphaned-ready record remains idle.                                                                                                       |
+| `destroy` | After the hook attempt and resource-ledger removal, one microtask after private cleanup settlement, while destroying ownership remains installed through the event. |
 
 Because listeners may synchronously reenter or destroy the pool, the engine checks terminal
 and waiter state after every awaited hook and every emit.
@@ -226,9 +232,10 @@ await pool.destroy()
 
 - [`tests/src/core/Pool.test.ts`](../../tests/src/core/Pool.test.ts) — canonical behavior:
   validation, hostile errors, duplicate ownership, transitional counts, overlapping FIFO
-  hooks, create continuation, abort boundaries, invalid replacement, cleanup ownership,
-  concurrent clear, stable reentrant destruction, late resources, aggregate failures,
-  emitter ordering, and high contention.
+  hooks, create continuation, abort boundaries, exclusive invalid-cleanup waiter ownership,
+  bounded and unbounded replacement, destroy-observer reentry ordering, concurrent clear,
+  stable reentrant destruction, late resources, aggregate failures, emitter ordering, and high
+  contention.
 - [`tests/src/core/factories.test.ts`](../../tests/src/core/factories.test.ts) — factory
   construction and instance identity only.
 - [`tests/guides/src/parity.test.ts`](../../tests/guides/src/parity.test.ts) — source/export,

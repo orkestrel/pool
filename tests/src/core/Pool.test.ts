@@ -18,7 +18,61 @@ describe('Pool validation and errors', () => {
 		expect(() => new Pool({ create: () => 0 })).not.toThrow()
 	})
 
-	it('recognizes only native signals and synchronously rejects an invalid acquire signal', () => {
+	it('snapshots a volatile maximum and observation hooks exactly once', async () => {
+		const initialCreate = createRecorder<[]>()
+		const laterCreate = createRecorder<[]>()
+		const initialErrors = createErrorRecorder()
+		const laterErrors = createErrorRecorder()
+		const listenerFailure = new Error('volatile listener failed')
+		let maxReads = 0
+		let onReads = 0
+		let errorReads = 0
+		const pool = new Pool({
+			create: () => 0,
+			get max() {
+				maxReads += 1
+				return maxReads === 1 ? 1 : 0
+			},
+			get on() {
+				onReads += 1
+				return onReads === 1 ? { create: initialCreate.handler } : { create: laterCreate.handler }
+			},
+			get error() {
+				errorReads += 1
+				return errorReads === 1 ? initialErrors.handler : laterErrors.handler
+			},
+		})
+
+		try {
+			expect([maxReads, onReads, errorReads]).toEqual([1, 1, 1])
+			pool.emitter.on('acquire', () => {
+				throw listenerFailure
+			})
+			const first = await pool.acquire()
+			try {
+				expect([maxReads, pool.size, pool.active]).toEqual([1, 1, 1])
+				expect(initialCreate.count).toBe(1)
+				expect(laterCreate.count).toBe(0)
+				expect(initialErrors.calls).toEqual([[listenerFailure, 'acquire']])
+				expect(laterErrors.count).toBe(0)
+				const second = pool.acquire()
+				void second.catch(() => {})
+				first.release()
+				const next = await second
+				try {
+					expect(next.value).toBe(0)
+				} finally {
+					next.release()
+				}
+			} finally {
+				first.release()
+			}
+		} finally {
+			await pool.destroy()
+		}
+	})
+
+	it('recognizes only native signals and synchronously throws for an invalid acquire signal', () => {
 		const pool = new Pool({ create: () => 0 })
 		const signal = new AbortController().signal
 		const proxied = new Proxy(signal, {
@@ -411,6 +465,236 @@ describe('Pool validation and cleanup ownership', () => {
 		held.release()
 		await expect(first).rejects.toMatchObject({ code: 'cleanup', cause: failure })
 		await expect(second).resolves.toMatchObject({ value: 1 })
+	})
+
+	it('keeps delayed invalid-cleanup failure bound while one later waiter gets replacement capacity', async () => {
+		for (const maximum of [2, undefined]) {
+			const cleanup = createGate<void>()
+			const entered = createGate<void>()
+			const replacement = createGate<void>()
+			const failure = new Error('invalid cleanup failed')
+			let created = 0
+			let destroyed = 0
+			const pool = new Pool({
+				create: () => {
+					const value = created
+					created += 1
+					if (created === 2) replacement.resolve()
+					return value
+				},
+				validate: () => false,
+				destroy: () => {
+					destroyed += 1
+					if (destroyed === 1) {
+						entered.resolve()
+						return cleanup.promise
+					}
+				},
+				...(maximum === undefined ? {} : { max: maximum }),
+			})
+			const held = await pool.acquire()
+			held.release()
+			const first = pool.acquire()
+			await entered.promise
+			const second = pool.acquire()
+			void first.then(
+				(token) => token.release(),
+				() => {},
+			)
+			void second.then(
+				(token) => token.release(),
+				() => {},
+			)
+			const outcomes = Promise.allSettled([first, second])
+
+			try {
+				await replacement.promise
+				cleanup.reject(failure)
+				const [firstResult, secondResult] = await outcomes
+				if (firstResult === undefined || firstResult.status !== 'rejected') {
+					throw new Error('expected the invalid-cleanup waiter to reject')
+				}
+				if (!isPoolError(firstResult.reason)) throw new Error('expected a PoolError')
+				expect(firstResult.reason.code).toBe('cleanup')
+				expect(firstResult.reason.cause).toBe(failure)
+				if (secondResult === undefined || secondResult.status !== 'fulfilled') {
+					throw new Error('expected the later waiter to receive the replacement')
+				}
+				expect(secondResult.value.value).toBe(1)
+				expect([created, destroyed, pool.size, pool.idle, pool.active]).toEqual([2, 1, 1, 1, 0])
+			} finally {
+				held.release()
+				cleanup.resolve()
+				await Promise.allSettled([outcomes, pool.destroy()])
+			}
+		}
+	})
+
+	it('preserves the FIFO head assignment through reentrant invalid cleanup', async () => {
+		const replacement = createGate<void>()
+		const settled = createRecorder<[number, number]>()
+		let created = 0
+		let validated = 0
+		let reentered: ReturnType<Pool<number>['acquire']> | undefined
+		const pool = new Pool({
+			create: () => created++,
+			validate: () => {
+				validated += 1
+				return validated > 1
+			},
+			destroy: () => {},
+			on: {
+				create: () => {
+					if (created === 2) replacement.resolve()
+				},
+				destroy: () => {
+					if (reentered === undefined) {
+						reentered = pool.acquire()
+						void reentered.catch(() => {})
+					}
+				},
+			},
+			max: 1,
+		})
+		const held = await pool.acquire()
+		const first = pool.acquire()
+		const second = pool.acquire()
+		const firstUse = first.then((token) => {
+			try {
+				settled.handler(0, token.value)
+			} finally {
+				token.release()
+			}
+		})
+		const secondUse = second.then((token) => {
+			try {
+				settled.handler(1, token.value)
+			} finally {
+				token.release()
+			}
+		})
+		void firstUse.catch(() => {})
+		void secondUse.catch(() => {})
+		let thirdUse: Promise<void> | undefined
+
+		try {
+			held.release()
+			await replacement.promise
+			const third = reentered
+			if (third === undefined) throw new Error('destroy listener did not reenter acquisition')
+			thirdUse = third.then((token) => {
+				try {
+					settled.handler(2, token.value)
+				} finally {
+					token.release()
+				}
+			})
+			await Promise.all([firstUse, secondUse, thirdUse])
+			expect(settled.calls).toEqual([
+				[0, 1],
+				[1, 1],
+				[2, 1],
+			])
+			expect([created, validated]).toEqual([2, 3])
+			expect([pool.size, pool.idle, pool.active]).toEqual([1, 1, 0])
+			await pool.destroy()
+		} finally {
+			held.release()
+			await Promise.allSettled([
+				firstUse,
+				secondUse,
+				...(thirdUse === undefined ? [] : [thirdUse]),
+				pool.destroy(),
+			])
+		}
+	})
+
+	it('establishes invalid-cleanup failure before synchronous destroy observation reenters', async () => {
+		const observed = createGate<void>()
+		const settled = createRecorder<[number, number]>()
+		const rejected = createRecorder<[unknown]>()
+		const cleanupFailure = new Error('reentrant cleanup failed')
+		const abortReason = new Error('reentrant abort must be too late')
+		const controller = new AbortController()
+		let created = 0
+		let validated = 0
+		let destroyed = 0
+		let reentered: ReturnType<Pool<number>['acquire']> | undefined
+		const pool = new Pool({
+			create: () => created++,
+			validate: () => {
+				validated += 1
+				return validated > 1
+			},
+			destroy: () => {
+				destroyed += 1
+				if (destroyed === 1) throw cleanupFailure
+			},
+			on: {
+				destroy: () => {
+					if (reentered !== undefined) return
+					controller.abort(abortReason)
+					reentered = pool.acquire()
+					void reentered.catch(() => {})
+					observed.resolve()
+				},
+			},
+			max: 1,
+		})
+		const held = await pool.acquire()
+		held.release()
+		const first = pool.acquire(controller.signal)
+		const second = pool.acquire()
+		const firstUse = first.then(
+			(token) => {
+				settled.handler(0, token.value)
+				token.release()
+			},
+			(error: unknown) => rejected.handler(error),
+		)
+		const secondUse = second.then((token) => {
+			try {
+				settled.handler(1, token.value)
+			} finally {
+				token.release()
+			}
+		})
+		void secondUse.catch(() => {})
+		let thirdUse: Promise<void> | undefined
+
+		try {
+			await observed.promise
+			const third = reentered
+			if (third === undefined) throw new Error('destroy listener did not reenter acquisition')
+			thirdUse = third.then((token) => {
+				try {
+					settled.handler(2, token.value)
+				} finally {
+					token.release()
+				}
+			})
+			await Promise.all([firstUse, secondUse, thirdUse])
+			expect(rejected.count).toBe(1)
+			const failure = rejected.calls[0]?.[0]
+			if (!isPoolError(failure)) throw new Error('expected a cleanup PoolError')
+			expect(failure.code).toBe('cleanup')
+			expect(failure.cause).toBe(cleanupFailure)
+			expect(failure).not.toBe(abortReason)
+			expect(settled.calls).toEqual([
+				[1, 1],
+				[2, 1],
+			])
+			expect([created, validated, destroyed]).toEqual([2, 2, 1])
+			expect([pool.size, pool.idle, pool.active]).toEqual([1, 1, 0])
+		} finally {
+			held.release()
+			await Promise.allSettled([
+				firstUse,
+				secondUse,
+				...(thirdUse === undefined ? [] : [thirdUse]),
+				pool.destroy(),
+			])
+		}
 	})
 
 	it('deduplicates repeated clear failure identities while removing every claimed record', async () => {

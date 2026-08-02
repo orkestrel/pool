@@ -20,8 +20,8 @@ npm install @orkestrel/pool
 
 ## Requirements
 
-- Node.js >= 24
-- ESM-only (no CommonJS build)
+- Node.js >= 22.12.0
+- ESM and CommonJS builds
 
 ## Usage
 
