@@ -752,7 +752,9 @@ export function environmentBoundary(
 									? undefined
 									: packageRootOf(packageName, physicalSource)
 							if (packageRoot === undefined || !containedPath(packageRoot, physicalSource)) {
-								this.error('Resolved dependencies must remain inside their physical package root')
+								return this.error(
+									'Resolved dependencies must remain inside their physical package root',
+								)
 							}
 							trustedPackageRoots.add(packageRoot)
 						}
@@ -760,7 +762,7 @@ export function environmentBoundary(
 					}
 					const resolvedSource = workspacePath(physicalSource)
 					if (resolvedSource === undefined) {
-						this.error('Environment modules cannot import files outside the workspace')
+						return this.error('Environment modules cannot import files outside the workspace')
 					}
 					const assetError = environmentPathError(owner, resolvedSource)
 					if (assetError !== undefined) this.error(assetError)
