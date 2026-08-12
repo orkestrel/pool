@@ -4,14 +4,14 @@ A dual-axis index into this repository's guides — by concept, and by directory
 
 ## By concept
 
-| Concept | Spec                         | Source                    | Tests                                 |
-| ------- | ---------------------------- | ------------------------- | ------------------------------------- |
+| Concept | Spec                 | Source                    | Tests                                 |
+| ------- | -------------------- | ------------------------- | ------------------------------------- |
 | Pool    | [`pool.md`](pool.md) | [`src/core`](../src/core) | [`tests/src/core`](../tests/src/core) |
 
 ## By directory
 
-| Directory  | Guide                        |
-| ---------- | ---------------------------- |
+| Directory  | Guide                |
+| ---------- | -------------------- |
 | `src/core` | [`pool.md`](pool.md) |
 
 ## Dependency reference
