@@ -1,6 +1,6 @@
 {
 	"name": "@orkestrel/pool",
-	"version": "0.0.6",
+	"version": "0.0.7",
 	"description": "A typed resource pool with optional bounded capacity, FIFO abort-cancellable waiting, validated idle reuse, and an observable lifecycle. Part of the @orkestrel line.",
 	"keywords": [
 		"connection-pool",
@@ -63,7 +63,7 @@
 		"prepublishOnly": "npm run format:check && npm run lint:check && npm run check && npm run build && npm test"
 	},
 	"dependencies": {
-		"@orkestrel/emitter": "^0.0.5"
+		"@orkestrel/emitter": "^0.0.6"
 	},
 	"devDependencies": {
 		"@microsoft/api-extractor": "^7.58.12",
