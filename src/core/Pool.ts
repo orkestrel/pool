@@ -35,7 +35,7 @@ export class Pool<T> implements PoolInterface<T> {
 	readonly #validating = new Set<object>()
 	readonly #leased = new Set<object>()
 	readonly #destroying = new Map<object, Promise<void>>()
-	readonly #waiters: PromiseWithResolvers<PoolToken<T>>[] = []
+	readonly #waiters: Array<PromiseWithResolvers<PoolToken<T>>> = []
 	readonly #assigned = new Set<PromiseWithResolvers<PoolToken<T>>>()
 	readonly #reservations = new Set<PromiseWithResolvers<PoolToken<T>>>()
 	readonly #signals = new Map<
@@ -133,7 +133,7 @@ export class Pool<T> implements PoolInterface<T> {
 	clear(): Promise<void> {
 		if (this.#ending !== undefined) return Promise.reject(new PoolError({ code: 'destroyed' }))
 		const records = this.#available.splice(0)
-		const cleanups: Promise<void>[] = []
+		const cleanups: Array<Promise<void>> = []
 		for (const record of records) {
 			const cleanup = this.#dispose(record)
 			cleanups.push(cleanup)
@@ -508,7 +508,7 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#finish()
 	}
 
-	async #settleClear(cleanups: readonly Promise<void>[]): Promise<void> {
+	async #settleClear(cleanups: ReadonlyArray<Promise<void>>): Promise<void> {
 		const settled = await Promise.allSettled(cleanups)
 		const failures: unknown[] = []
 		for (const result of settled) {
