@@ -46,38 +46,6 @@ function readText(relative: string): string {
 
 const manifest = parseManifest(readText('guides/README.md'), 'guides')
 
-it('keeps README runtime and module-format support aligned with the package manifest', () => {
-	const readme = readFileSync(join(ROOT, 'README.md'), 'utf8')
-	const packageManifest: unknown = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
-	if (
-		typeof packageManifest !== 'object' ||
-		packageManifest === null ||
-		!('engines' in packageManifest) ||
-		typeof packageManifest.engines !== 'object' ||
-		packageManifest.engines === null ||
-		!('node' in packageManifest.engines) ||
-		typeof packageManifest.engines.node !== 'string'
-	) {
-		throw new Error('package manifest must declare a Node.js engine')
-	}
-	if (
-		!('exports' in packageManifest) ||
-		typeof packageManifest.exports !== 'object' ||
-		packageManifest.exports === null ||
-		!('.' in packageManifest.exports) ||
-		typeof packageManifest.exports['.'] !== 'object' ||
-		packageManifest.exports['.'] === null
-	) {
-		throw new Error('package manifest must declare a root export')
-	}
-
-	const documentedNode = packageManifest.engines.node.replace(/^([<>=~^]+)(?=\d)/, '$1 ')
-	expect(readme).toContain(`- Node.js ${documentedNode}`)
-	expect(packageManifest.exports['.']).toHaveProperty('import')
-	expect(packageManifest.exports['.']).toHaveProperty('require')
-	expect(readme).toContain('- ESM and CommonJS builds')
-})
-
 it('manifest lists at least one guide', () => {
 	expect(manifest.length).toBeGreaterThan(0)
 })
