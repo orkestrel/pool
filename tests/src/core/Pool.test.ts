@@ -1,11 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Pool, PoolError, isPoolError, isPoolMax, isPoolSignal } from '@src/core'
-import {
-	createErrorRecorder,
-	createGate,
-	createRecorder,
-	recordEmitterEvents,
-} from '../../setup.js'
+import { createRecorder } from '@orkestrel/test'
+import { createErrorRecorder, createGate, recordEmitterEvents } from '../../setup.js'
 
 describe('Pool validation and errors', () => {
 	it('accepts only positive safe integer maxima and omission remains unbounded', () => {
