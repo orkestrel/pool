@@ -10,46 +10,6 @@ import { createRecorder } from '@orkestrel/test'
 // The fleet-wide helpers live in `@orkestrel/test`. What remains here is what is
 // specific to this package: the emitter recorder bundles and the Pool resource fixture.
 
-/** A manually-settled promise — the `resolve` / `reject` lifted out of its executor. */
-export interface TestGateInterface<T> {
-	readonly promise: Promise<T>
-	readonly resolve: (value: T) => void
-	readonly reject: (error: unknown) => void
-}
-
-/**
- * Create a {@link TestGateInterface} — a deferred whose `promise` settles only when
- * the test calls `resolve` / `reject`. Lets a test gate a real handler on a signal it
- * controls, to prove ordering / concurrency / pause behaviour without racing wall-clock
- * timers (AGENTS §16.1).
- *
- * @typeParam T - The value the gate's `promise` resolves with
- * @returns A gate exposing its `promise` and its `resolve` / `reject`
- */
-export function createGate<T = void>(): TestGateInterface<T> {
-	let resolve: (value: T) => void = () => {}
-	let reject: (error: unknown) => void = () => {}
-	const promise = new Promise<T>((res, rej) => {
-		resolve = res
-		reject = rej
-	})
-	return { promise, resolve, reject }
-}
-
-/**
- * Create a recorder for an {@link import('@orkestrel/emitter').EmitterErrorHandler} — the
- * emitter's own listener-error channel (AGENTS §13): a `RecorderInterface<[error, event]>`
- * whose `handler` is wired as the `error` option, so an emit-safety test asserts a buggy
- * listener's throw was routed here (with the offending event name) instead of corrupting the
- * entity. Argument order is `(error, event)`, matching `EmitterErrorHandler`. A thin alias over
- * {@link createRecorder} (AGENTS §16.1 — extract-once over the per-entity emit-safety blocks).
- *
- * @returns A recorder of `[error: unknown, event: string]` calls
- */
-export function createErrorRecorder(): RecorderInterface<readonly [error: unknown, event: string]> {
-	return createRecorder<readonly [error: unknown, event: string]>()
-}
-
 /** A recorder per named event of an {@link EmitterInterface}, keyed by event name. */
 export type EmitterRecorders<TMap extends EventMap, TName extends keyof TMap> = {
 	readonly [K in TName]: RecorderInterface<TMap[K]>

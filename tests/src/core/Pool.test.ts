@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Pool, PoolError, isPoolError, isPoolMax, isPoolSignal } from '@src/core'
 import { createRecorder } from '@orkestrel/test'
-import { createErrorRecorder, createGate, recordEmitterEvents } from '../../setup.js'
+import { recordEmitterEvents } from '../../setup.js'
 
 describe('Pool validation and errors', () => {
 	it('accepts only positive safe integer maxima and omission remains unbounded', () => {
@@ -17,8 +17,8 @@ describe('Pool validation and errors', () => {
 	it('snapshots a volatile maximum and observation hooks exactly once', async () => {
 		const initialCreate = createRecorder<[]>()
 		const laterCreate = createRecorder<[]>()
-		const initialErrors = createErrorRecorder()
-		const laterErrors = createErrorRecorder()
+		const initialErrors = createRecorder<readonly [error: unknown, event: string]>()
+		const laterErrors = createRecorder<readonly [error: unknown, event: string]>()
 		const listenerFailure = new Error('volatile listener failed')
 		let maxReads = 0
 		let onReads = 0
@@ -174,9 +174,9 @@ describe('Pool ownership and counts', () => {
 	})
 
 	it('reports reservations, validation, leases, idle records, and cleanup exactly', async () => {
-		const creation = createGate<number>()
-		const validation = createGate<boolean>()
-		const cleanup = createGate<void>()
+		const creation = Promise.withResolvers<number>()
+		const validation = Promise.withResolvers<boolean>()
+		const cleanup = Promise.withResolvers<void>()
 		const pool = new Pool({
 			create: () => creation.promise,
 			validate: () => validation.promise,
@@ -208,7 +208,7 @@ describe('Pool ownership and counts', () => {
 	})
 
 	it('releases each exact token once and ignores release after teardown ownership transfers', async () => {
-		const cleanup = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
 		const pool = new Pool({ create: () => 1, destroy: () => cleanup.promise })
 		const token = await pool.acquire()
 
@@ -226,7 +226,11 @@ describe('Pool ownership and counts', () => {
 
 describe('Pool FIFO acquisition', () => {
 	it('overlaps creates up to max without letting out-of-order completion overtake the head', async () => {
-		const gates = [createGate<number>(), createGate<number>(), createGate<number>()]
+		const gates = [
+			Promise.withResolvers<number>(),
+			Promise.withResolvers<number>(),
+			Promise.withResolvers<number>(),
+		]
 		const settled = createRecorder<[number]>()
 		let created = 0
 		const pool = new Pool({ create: () => gates[created++]?.promise ?? Promise.reject(), max: 3 })
@@ -271,7 +275,7 @@ describe('Pool FIFO acquisition', () => {
 	})
 
 	it('overlaps validations while retaining FIFO settlement', async () => {
-		const gates = [createGate<boolean>(), createGate<boolean>()]
+		const gates = [Promise.withResolvers<boolean>(), Promise.withResolvers<boolean>()]
 		const settled = createRecorder<[number]>()
 		let created = 0
 		let validated = 0
@@ -298,7 +302,7 @@ describe('Pool FIFO acquisition', () => {
 	})
 
 	it('rejects a failed create with code and continues later FIFO waiters', async () => {
-		const gates = [createGate<number>(), createGate<number>()]
+		const gates = [Promise.withResolvers<number>(), Promise.withResolvers<number>()]
 		let created = 0
 		const pool = new Pool({ create: () => gates[created++]?.promise ?? Promise.reject(), max: 2 })
 		const first = pool.acquire()
@@ -352,7 +356,7 @@ describe('Pool cancellation', () => {
 	})
 
 	it('aborts an assigned create and recycles its late resource without leaking the listener', async () => {
-		const creation = createGate<number>()
+		const creation = Promise.withResolvers<number>()
 		const controller = new AbortController()
 		const reason = new Error('assigned abort')
 		const pool = new Pool({ create: () => creation.promise, max: 1 })
@@ -369,7 +373,7 @@ describe('Pool cancellation', () => {
 	})
 
 	it('aborts a ready result behind a slow head and returns that record to idle', async () => {
-		const gates = [createGate<number>(), createGate<number>()]
+		const gates = [Promise.withResolvers<number>(), Promise.withResolvers<number>()]
 		let created = 0
 		const controller = new AbortController()
 		const reason = new Error('ready abort')
@@ -389,7 +393,7 @@ describe('Pool cancellation', () => {
 	})
 
 	it('aborts assigned validation and recycles its valid late result', async () => {
-		const validation = createGate<boolean>()
+		const validation = Promise.withResolvers<boolean>()
 		const controller = new AbortController()
 		const reason = new Error('validation abort')
 		let validations = 0
@@ -418,7 +422,7 @@ describe('Pool cancellation', () => {
 
 describe('Pool validation and cleanup ownership', () => {
 	it('treats false and thrown validation as invalid and replaces only after cleanup', async () => {
-		const cleanup = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
 		let created = 0
 		let mode = 0
 		const pool = new Pool({
@@ -465,9 +469,9 @@ describe('Pool validation and cleanup ownership', () => {
 
 	it('keeps delayed invalid-cleanup failure bound while one later waiter gets replacement capacity', async () => {
 		for (const maximum of [2, undefined]) {
-			const cleanup = createGate<void>()
-			const entered = createGate<void>()
-			const replacement = createGate<void>()
+			const cleanup = Promise.withResolvers<void>()
+			const entered = Promise.withResolvers<void>()
+			const replacement = Promise.withResolvers<void>()
 			const failure = new Error('invalid cleanup failed')
 			let created = 0
 			let destroyed = 0
@@ -527,7 +531,7 @@ describe('Pool validation and cleanup ownership', () => {
 	})
 
 	it('preserves the FIFO head assignment through reentrant invalid cleanup', async () => {
-		const replacement = createGate<void>()
+		const replacement = Promise.withResolvers<void>()
 		const settled = createRecorder<[number, number]>()
 		let created = 0
 		let validated = 0
@@ -606,7 +610,7 @@ describe('Pool validation and cleanup ownership', () => {
 	})
 
 	it('establishes invalid-cleanup failure before synchronous destroy observation reenters', async () => {
-		const observed = createGate<void>()
+		const observed = Promise.withResolvers<void>()
 		const settled = createRecorder<[number, number]>()
 		const rejected = createRecorder<[unknown]>()
 		const cleanupFailure = new Error('reentrant cleanup failed')
@@ -713,7 +717,7 @@ describe('Pool validation and cleanup ownership', () => {
 	})
 
 	it('repumps a capacity-blocked acquire after clear cleanup completes', async () => {
-		const cleanup = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
 		let created = 0
 		const pool = new Pool({ create: () => created++, destroy: () => cleanup.promise, max: 1 })
 		const held = await pool.acquire()
@@ -730,7 +734,7 @@ describe('Pool validation and cleanup ownership', () => {
 	})
 
 	it('frees capacity after failed clear cleanup and preserves the cleanup error', async () => {
-		const cleanup = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
 		const failure = new Error('clear failed')
 		let created = 0
 		const pool = new Pool({ create: () => created++, destroy: () => cleanup.promise, max: 1 })
@@ -746,8 +750,8 @@ describe('Pool validation and cleanup ownership', () => {
 	})
 
 	it('retains cleanup failure after cancelled invalid validation for eventual teardown', async () => {
-		const validation = createGate<boolean>()
-		const cleaned = createGate<void>()
+		const validation = Promise.withResolvers<boolean>()
+		const cleaned = Promise.withResolvers<void>()
 		const failure = new Error('orphan cleanup failed')
 		const reason = new Error('cancel validation')
 		const controller = new AbortController()
@@ -773,9 +777,9 @@ describe('Pool validation and cleanup ownership', () => {
 	})
 
 	it('retains cleanup failure when cancellation interrupts invalid cleanup', async () => {
-		const cleanup = createGate<void>()
-		const entered = createGate<void>()
-		const cleaned = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
+		const entered = Promise.withResolvers<void>()
+		const cleaned = Promise.withResolvers<void>()
 		const failure = new Error('interrupted cleanup failed')
 		const reason = new Error('cancel cleanup')
 		const controller = new AbortController()
@@ -803,7 +807,11 @@ describe('Pool validation and cleanup ownership', () => {
 	})
 
 	it('gives concurrent clears disjoint snapshots and excludes a lease released after the first snapshot', async () => {
-		const gates = [createGate<void>(), createGate<void>(), createGate<void>()]
+		const gates = [
+			Promise.withResolvers<void>(),
+			Promise.withResolvers<void>(),
+			Promise.withResolvers<void>(),
+		]
 		const destroyed = createRecorder<[number]>()
 		let created = 0
 		const pool = new Pool({
@@ -828,7 +836,7 @@ describe('Pool validation and cleanup ownership', () => {
 
 describe('Pool destruction', () => {
 	it('returns one exact stable promise and remains reentrant through synchronous destroy events', async () => {
-		const cleanup = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
 		const pool = new Pool({ create: () => 1, destroy: () => cleanup.promise })
 		const token = await pool.acquire()
 		token.release()
@@ -848,7 +856,7 @@ describe('Pool destruction', () => {
 	})
 
 	it('waits for a late create, emits create after ledger insertion, then destroys its resource', async () => {
-		const creation = createGate<number>()
+		const creation = Promise.withResolvers<number>()
 		const events: string[] = []
 		const pool = new Pool({
 			create: () => creation.promise,
@@ -869,7 +877,7 @@ describe('Pool destruction', () => {
 	})
 
 	it('waits for a create rejection during teardown without treating it as cleanup failure', async () => {
-		const creation = createGate<number>()
+		const creation = Promise.withResolvers<number>()
 		const failure = new Error('late create failed')
 		const pool = new Pool({ create: () => creation.promise })
 		const acquiring = pool.acquire()
@@ -882,7 +890,7 @@ describe('Pool destruction', () => {
 	})
 
 	it('waits for validation before cleaning the claimed record', async () => {
-		const validation = createGate<boolean>()
+		const validation = Promise.withResolvers<boolean>()
 		const destroyed = createRecorder<[number]>()
 		const pool = new Pool({
 			create: () => 1,
@@ -902,7 +910,7 @@ describe('Pool destruction', () => {
 	})
 
 	it('reports cleanup failure when destruction intersects validation', async () => {
-		const validation = createGate<boolean>()
+		const validation = Promise.withResolvers<boolean>()
 		const failure = new Error('validation cleanup failed')
 		const pool = new Pool({
 			create: () => 1,
@@ -924,7 +932,7 @@ describe('Pool destruction', () => {
 	})
 
 	it('invalidates leased tokens synchronously and waits for unresolved cleanup', async () => {
-		const cleanup = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
 		const settled = createRecorder<[]>()
 		const pool = new Pool({ create: () => 1, destroy: () => cleanup.promise })
 		const token = await pool.acquire()
@@ -943,7 +951,7 @@ describe('Pool destruction', () => {
 	})
 
 	it('shares cleanup with an overlapping clear and reports its failure to both owners', async () => {
-		const cleanup = createGate<void>()
+		const cleanup = Promise.withResolvers<void>()
 		const failure = new Error('overlap failed')
 		const pool = new Pool({ create: () => 1, destroy: () => cleanup.promise })
 		const token = await pool.acquire()
@@ -990,7 +998,7 @@ describe('Pool observation and pressure', () => {
 	it('threads initial hooks and isolates listener failures through the emitter error handler', async () => {
 		const created = createRecorder<[]>()
 		const continued = createRecorder<[]>()
-		const errors = createErrorRecorder()
+		const errors = createRecorder<readonly [error: unknown, event: string]>()
 		const pool = new Pool({
 			create: () => 1,
 			on: { create: created.handler },
