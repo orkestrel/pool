@@ -1,7 +1,9 @@
+import type { PoolEventMap } from '@src/core'
+import type { PoolEvent } from '../../setup.js'
 import { describe, expect, it } from 'vitest'
 import { Pool, PoolError, isPoolError, isPoolMax, isPoolSignal } from '@src/core'
-import { createRecorder } from '@orkestrel/test'
-import { recordEmitterEvents } from '../../setup.js'
+import { createRecorder, createRecorders } from '@orkestrel/test'
+import { POOL_EVENTS } from '../../setup.js'
 
 describe('Pool validation and errors', () => {
 	it('accepts only positive safe integer maxima and omission remains unbounded', () => {
@@ -320,7 +322,7 @@ describe('Pool FIFO acquisition', () => {
 		let healthy = true
 		let created = 0
 		const pool = new Pool({ create: () => created++, validate: () => healthy, max: 1 })
-		const events = recordEmitterEvents(pool.emitter, ['create', 'acquire', 'release', 'destroy'])
+		const events = createRecorders<PoolEventMap, PoolEvent>(pool.emitter, POOL_EVENTS)
 		const held = await pool.acquire()
 		const waiting = pool.acquire()
 		held.release()
