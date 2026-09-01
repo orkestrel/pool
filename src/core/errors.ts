@@ -17,7 +17,7 @@ import type { PoolErrorOptions } from './types.js'
 export class PoolError extends Error {
 	/** Stable machine-readable failure category. */
 	readonly code
-	/** Optional structured input or aggregate-cleanup details. */
+	/** Optional structured input or aggregate destroy-hook failure details. */
 	readonly context
 
 	/**

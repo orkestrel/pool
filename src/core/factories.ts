@@ -7,7 +7,8 @@ import { Pool } from './Pool.js'
  * @remarks
  * Concurrent create and validation hooks may overlap, while acquire promises settle in
  * request order. `clear` owns its idle snapshot; `destroy` returns one stable barrier and
- * waits for every in-flight hook and cleanup before destroying the emitter last.
+ * waits for every in-flight create, validation, and destroy attempt before destroying the
+ * emitter last.
  *
  * @typeParam T - The pooled resource type
  * @param options - Lifecycle hooks, optional positive safe `max`, and observation hooks

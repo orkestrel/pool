@@ -7,7 +7,7 @@ export type PoolCode = 'invalid' | 'destroyed' | 'create' | 'cleanup'
 export interface PoolContext {
 	/** The rejected public input, when the failure is an input-validation error. */
 	readonly value?: unknown
-	/** Distinct cleanup failures collected by `clear()` or `destroy()`. */
+	/** Distinct destroy-hook failures collected by `clear()` or `destroy()`. */
 	readonly failures?: readonly unknown[]
 }
 
@@ -29,7 +29,7 @@ export type PoolEventMap = {
 	readonly acquire: readonly []
 	/** A released resource became immediately idle. */
 	readonly release: readonly []
-	/** A resource cleanup hook completed or was attempted when absent. */
+	/** A resource destroy hook completed or was attempted when absent. */
 	readonly destroy: readonly []
 }
 
@@ -74,6 +74,9 @@ export interface PoolInterface<T> {
 	 *
 	 * @param signal - Optional native cancellation signal
 	 * @returns A promise for the unique resource lease
+	 * @throws {@link PoolError} Thrown when `signal` is present and is not a native `AbortSignal`,
+	 * with `code: 'invalid'`. This throw is synchronous rather than a rejected promise, so a caller
+	 * that handles failures with `.catch()` alone misses it.
 	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>>
 	/**

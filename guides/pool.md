@@ -55,11 +55,11 @@ try {
 | API                | Kind      | Summary                                                          |
 | ------------------ | --------- | ---------------------------------------------------------------- |
 | `PoolCode`         | type      | `invalid`, `destroyed`, `create`, or `cleanup`.                  |
-| `PoolContext`      | interface | Rejected input or distinct aggregate-cleanup failures.           |
+| `PoolContext`      | interface | Rejected input or distinct aggregate destroy-hook failures.      |
 | `PoolErrorOptions` | interface | Code, optional cause, and optional context for `PoolError`.      |
 | `PoolEventMap`     | type      | `create`, `acquire`, `release`, and `destroy` lifecycle signals. |
 | `PoolToken`        | interface | A unique lease with readonly `value` and idempotent `release()`. |
-| `PoolOptions`      | interface | Create, cleanup, validation, capacity, and emitter options.      |
+| `PoolOptions`      | interface | Create, destroy, validation, capacity, and emitter options.      |
 | `PoolInterface`    | interface | Count/emitter properties plus `acquire`, `clear`, and `destroy`. |
 
 `PoolInterface.emitter`, `size`, `idle`, and `active` are readonly data properties.

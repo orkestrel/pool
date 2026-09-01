@@ -26,7 +26,7 @@ import { isPoolMax, isPoolSignal } from './validators.js'
  */
 export class Pool<T> implements PoolInterface<T> {
 	readonly #create: () => Promise<T> | T
-	readonly #cleanup: ((value: T) => Promise<void> | void) | undefined
+	readonly #destroy: ((value: T) => Promise<void> | void) | undefined
 	readonly #validate: ((value: T) => Promise<boolean> | boolean) | undefined
 	readonly #max: number | undefined
 	readonly #emitter: Emitter<PoolEventMap>
@@ -58,6 +58,8 @@ export class Pool<T> implements PoolInterface<T> {
 	 * Construct a pool and synchronously validate its capacity contract.
 	 *
 	 * @param options - Resource hooks, observation hooks, and optional positive safe `max`
+	 * @throws {@link PoolError} Thrown when `options.max` is present and is not a positive safe
+	 * integer, with `code: 'invalid'`.
 	 */
 	constructor(options: PoolOptions<T>) {
 		const max = options.max
@@ -67,7 +69,7 @@ export class Pool<T> implements PoolInterface<T> {
 		const on = options.on
 		const error = options.error
 		this.#create = options.create
-		this.#cleanup = options.destroy
+		this.#destroy = options.destroy
 		this.#validate = options.validate
 		this.#max = max
 		this.#emitter = new Emitter({
@@ -101,6 +103,9 @@ export class Pool<T> implements PoolInterface<T> {
 	 *
 	 * @param signal - Optional native cancellation signal
 	 * @returns A promise for the unique resource lease
+	 * @throws {@link PoolError} Thrown when `signal` is present and is not a native `AbortSignal`,
+	 * with `code: 'invalid'`. This throw is synchronous rather than a rejected promise, so a caller
+	 * that handles failures with `.catch()` alone misses it.
 	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>> {
 		if (signal !== undefined && !isPoolSignal(signal)) {
@@ -486,7 +491,7 @@ export class Pool<T> implements PoolInterface<T> {
 	async #clean(record: object, value: T, cleanup: PromiseWithResolvers<void>): Promise<void> {
 		let attempt: Promise<void>
 		try {
-			attempt = Promise.resolve(this.#cleanup?.(value))
+			attempt = Promise.resolve(this.#destroy?.(value))
 		} catch (error: unknown) {
 			attempt = Promise.reject(error)
 		}
