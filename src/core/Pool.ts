@@ -5,8 +5,9 @@ import { PoolError } from './errors.js'
 import { isPoolMax, isPoolSignal } from './validators.js'
 
 /**
- * A capacity-aware resource pool whose opaque ownership records preserve FIFO settlement,
- * cancellation, exact lease release, and deterministic teardown under concurrent hooks.
+ * Represents a capacity-aware resource pool whose opaque ownership records preserve FIFO
+ * settlement, cancellation, exact lease release, and deterministic teardown under concurrent
+ * hooks.
  *
  * @typeParam T - The pooled resource value
  *
@@ -55,7 +56,7 @@ export class Pool<T> implements PoolInterface<T> {
 	#repump = false
 
 	/**
-	 * Construct a pool and synchronously validate its capacity contract.
+	 * Constructs a pool and synchronously validates its capacity contract.
 	 *
 	 * @param options - Resource hooks, observation hooks, and optional positive safe `max`
 	 * @throws {@link PoolError} Thrown when `options.max` is present and is not a positive safe
@@ -78,28 +79,28 @@ export class Pool<T> implements PoolInterface<T> {
 		})
 	}
 
-	/** The typed synchronous lifecycle observation surface. */
+	/** Holds the typed synchronous lifecycle observation surface. */
 	get emitter(): EmitterInterface<PoolEventMap> {
 		return this.#emitter
 	}
 
-	/** All owned records, including records validating or destroying. */
+	/** Counts all owned records, including records validating or destroying. */
 	get size(): number {
 		return this.#resources.size
 	}
 
-	/** Records immediately available without validation work. */
+	/** Counts the records immediately available without validation work. */
 	get idle(): number {
 		return this.#available.length
 	}
 
-	/** Records represented by unsettled released-once lease tokens. */
+	/** Counts the records represented by unsettled released-once lease tokens. */
 	get active(): number {
 		return this.#leased.size
 	}
 
 	/**
-	 * Queue and lease one resource in FIFO settlement order.
+	 * Queues and leases one resource in FIFO settlement order.
 	 *
 	 * @param signal - Optional native cancellation signal
 	 * @returns A promise for the unique resource lease
@@ -131,7 +132,7 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	/**
-	 * Destroy the records that are idle at this call's synchronous snapshot.
+	 * Destroys the records that are idle at this call's synchronous snapshot.
 	 *
 	 * @returns A promise that settles after every snapshot cleanup attempt
 	 */
@@ -151,7 +152,7 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	/**
-	 * Permanently tear down the pool and return its stable completion barrier.
+	 * Tears down the pool permanently and returns its stable completion barrier.
 	 *
 	 * @returns The exact promise shared by every destroy call
 	 */

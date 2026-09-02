@@ -1,7 +1,8 @@
 import type { PoolErrorOptions } from './types.js'
 
 /**
- * A stable, machine-readable pool failure with the original cause and structured context.
+ * Represents a stable, machine-readable pool failure with the original cause and structured
+ * context.
  *
  * @example
  * ```ts
@@ -15,13 +16,13 @@ import type { PoolErrorOptions } from './types.js'
  * ```
  */
 export class PoolError extends Error {
-	/** Stable machine-readable failure category. */
+	/** Holds the stable machine-readable failure category. */
 	readonly code
-	/** Optional structured input or aggregate destroy-hook failure details. */
+	/** Holds optional structured input or aggregate destroy-hook failure details. */
 	readonly context
 
 	/**
-	 * Create a pool failure without coercing a hostile thrown value.
+	 * Creates a pool failure without coercing a hostile thrown value.
 	 *
 	 * @param options - Stable code plus optional cause and structured context
 	 */
@@ -47,10 +48,10 @@ export class PoolError extends Error {
 }
 
 /**
- * Test whether an unknown value is a {@link PoolError}, returning `false` for hostile proxies.
+ * Tests whether an unknown value is a {@link PoolError}, returning `false` for hostile proxies.
  *
  * @param value - The unknown boundary value
- * @returns Whether the value is a real `PoolError` instance
+ * @returns True if the value is a real `PoolError` instance; false otherwise
  *
  * @example
  * ```ts

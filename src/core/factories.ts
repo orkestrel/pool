@@ -2,7 +2,7 @@ import type { PoolInterface, PoolOptions } from './types.js'
 import { Pool } from './Pool.js'
 
 /**
- * Create a resource pool with optional bounded capacity, unique ownership, and FIFO settlement.
+ * Creates a resource pool with optional bounded capacity, unique ownership, and FIFO settlement.
  *
  * @remarks
  * Concurrent create and validation hooks may overlap, while acquire promises settle in

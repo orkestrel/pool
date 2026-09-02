@@ -1,8 +1,8 @@
 /**
- * Test whether a value is a valid finite pool maximum.
+ * Tests whether a value is a valid finite pool maximum.
  *
  * @param value - The unknown maximum candidate
- * @returns Whether the value is a positive safe integer
+ * @returns True if the value is a positive safe integer; false otherwise
  *
  * @example
  * ```ts
@@ -15,10 +15,10 @@ export function isPoolMax(value: unknown): value is number {
 }
 
 /**
- * Test whether a value is a native `AbortSignal`, returning `false` for hostile proxies.
+ * Tests whether a value is a native `AbortSignal`, returning `false` for hostile proxies.
  *
  * @param value - The unknown signal candidate
- * @returns Whether the value is a native `AbortSignal`
+ * @returns True if the value is a native `AbortSignal`; false otherwise
  *
  * @example
  * ```ts
