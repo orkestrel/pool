@@ -46,7 +46,7 @@ try {
 ## Guide
 
 For the full surface — the `Pool` engine, options, the observable `emitter`,
-and usage patterns — see [`guides/src/pool.md`](guides/src/pool.md).
+and usage patterns — see [`guides/pool.md`](guides/pool.md).
 
 ## Package
 
