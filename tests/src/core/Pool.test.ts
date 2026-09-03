@@ -1,16 +1,18 @@
 import type { PoolEventMap } from '@src/core'
 import type { PoolEvent } from '../../setup.js'
 import { describe, expect, it } from 'vitest'
-import { Pool, PoolError, isPoolError, isPoolMax, isPoolSignal } from '@src/core'
+import { Pool, PoolError, isPoolError, isPoolSignal } from '@src/core'
+// `getEventListeners` reads the listeners really registered on a real signal. `createSignal` from
+// `@orkestrel/test` counts through own properties it installs on the signal it creates, and `Pool`
+// registers through `AbortSignal.prototype.addEventListener`, which bypasses them, so its tally
+// stays 0 here whatever the pool does. Do not swap this import back.
+import { getEventListeners } from 'node:events'
 import { createRecorder, createRecorders } from '@orkestrel/test'
 import { POOL_EVENTS } from '../../setup.js'
 
 describe('Pool validation and errors', () => {
-	it('accepts only positive safe integer maxima and omission remains unbounded', () => {
-		expect(isPoolMax(1)).toBe(true)
-		expect(isPoolMax(Number.MAX_SAFE_INTEGER)).toBe(true)
+	it('rejects a maximum that is not a positive safe integer and accepts omission as unbounded', () => {
 		for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
-			expect(isPoolMax(value)).toBe(false)
 			expect(() => new Pool({ create: () => 0, max: value })).toThrow(PoolError)
 		}
 		expect(() => new Pool({ create: () => 0 })).not.toThrow()
@@ -70,17 +72,13 @@ describe('Pool validation and errors', () => {
 		}
 	})
 
-	it('recognizes only native signals and synchronously throws for an invalid acquire signal', () => {
+	it('synchronously throws for an invalid acquire signal', () => {
 		const pool = new Pool({ create: () => 0 })
-		const signal = new AbortController().signal
-		const proxied = new Proxy(signal, {
+		const proxied = new Proxy(new AbortController().signal, {
 			get() {
 				throw new Error('signal trap')
 			},
 		})
-		expect(isPoolSignal(signal)).toBe(true)
-		expect(isPoolSignal(proxied)).toBe(false)
-		expect(isPoolSignal({ aborted: false })).toBe(false)
 		expect(() => Reflect.apply(pool.acquire, pool, [{ aborted: false }])).toThrow(PoolError)
 		expect(() => pool.acquire(proxied)).toThrow(PoolError)
 	})
@@ -357,7 +355,7 @@ describe('Pool cancellation', () => {
 		expect(pool.idle).toBe(1)
 	})
 
-	it('aborts an assigned create and recycles its late resource without leaking the listener', async () => {
+	it('aborts an assigned create and recycles its late resource', async () => {
 		const creation = Promise.withResolvers<number>()
 		const controller = new AbortController()
 		const reason = new Error('assigned abort')
@@ -370,8 +368,33 @@ describe('Pool cancellation', () => {
 		await Promise.resolve()
 		const next = await pool.acquire()
 		expect(next.value).toBe(7)
-		controller.abort(new Error('late abort'))
 		expect(pool.active).toBe(1)
+	})
+
+	it('detaches the abort listener when an acquire settles successfully and when destroy rejects it', async () => {
+		// The detach sites a leak can reach: a signal-bearing acquire that commits, and a parked
+		// waiter that `destroy()` rejects. An abort-settled acquire cannot pin either. Its
+		// registration carries `{ once: true }`, so the platform removes the listener before the
+		// pool's own detach runs, and the tally returns to 0 with that detach deleted.
+		const creation = Promise.withResolvers<number>()
+		const committing = new AbortController()
+		const pool = new Pool({ create: () => creation.promise, max: 1 })
+		const acquiring = pool.acquire(committing.signal)
+		expect(getEventListeners(committing.signal, 'abort')).toHaveLength(1)
+
+		creation.resolve(3)
+		const token = await acquiring
+		expect(getEventListeners(committing.signal, 'abort')).toHaveLength(0)
+
+		const parked = new AbortController()
+		const waiting = pool.acquire(parked.signal)
+		expect(getEventListeners(parked.signal, 'abort')).toHaveLength(1)
+
+		const destroying = pool.destroy()
+		await expect(waiting).rejects.toMatchObject({ code: 'destroyed' })
+		expect(getEventListeners(parked.signal, 'abort')).toHaveLength(0)
+		token.release()
+		await destroying
 	})
 
 	it('aborts a ready result behind a slow head and returns that record to idle', async () => {

@@ -77,18 +77,29 @@ export interface PoolInterface<T> {
 	 * @throws {@link PoolError} Thrown when `signal` is present and is not a native `AbortSignal`,
 	 * with `code: 'invalid'`. This throw is synchronous rather than a rejected promise, so a caller
 	 * that handles failures with `.catch()` alone misses it.
+	 * @throws {@link PoolError} Thrown as a rejection when `destroy()` has already begun, with
+	 * `code: 'destroyed'`; when the create hook fails, with `code: 'create'` and the hook's thrown
+	 * value as `cause`; and when an invalid record's cleanup fails, with `code: 'cleanup'`. A
+	 * `signal` that aborts rejects with the caller's exact `signal.reason` instead.
 	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>>
 	/**
 	 * Destroys the records that are idle at this call's synchronous snapshot.
 	 *
 	 * @returns A promise that settles after every snapshot cleanup attempt
+	 * @throws {@link PoolError} Thrown when `destroy()` has already begun, with `code: 'destroyed'`.
+	 * @throws {@link PoolError} Thrown when a claimed record's destroy hook fails, with
+	 * `code: 'cleanup'` and every distinct failure in `context.failures`. Each arrives as a rejected
+	 * promise rather than a synchronous throw.
 	 */
 	clear(): Promise<void>
 	/**
 	 * Tears down the pool permanently and returns its stable completion barrier.
 	 *
 	 * @returns The exact promise shared by every destroy call
+	 * @throws {@link PoolError} Thrown when a destroy hook failed during teardown, with
+	 * `code: 'cleanup'` and every distinct failure in `context.failures`. The barrier rejects; it
+	 * never throws synchronously, and a repeat call receives the same rejected promise.
 	 */
 	destroy(): Promise<void>
 }

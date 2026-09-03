@@ -13,6 +13,8 @@ import { Pool } from './Pool.js'
  * @typeParam T - The pooled resource type
  * @param options - Lifecycle hooks, optional positive safe `max`, and observation hooks
  * @returns A working {@link PoolInterface}
+ * @throws {@link PoolError} Thrown when `options.max` is present and is not a positive safe
+ * integer, with `code: 'invalid'`. Construction validates it synchronously, before the pool exists.
  *
  * @example
  * ```ts

@@ -1,8 +1,9 @@
 # @orkestrel/pool
 
-A bounded, typed **resource pool**: idle reuse + FIFO waiting. `acquire` leases
-a resource — reusing a validated idle one, growing up to `max`, or parking on
-a FIFO waiter list until a `release` frees one — and the returned token's
+A typed **resource pool** with optional bounded capacity: idle reuse + FIFO
+waiting. `acquire` leases a resource — reusing a validated idle one, growing up
+to `max` when one is set, growing without bound when it is not, or parking on a
+FIFO waiter list until a `release` frees one — and the returned token's
 `release()` returns it for reuse (or hands it straight to the next waiter).
 The FIFO handoff is validated, so a resource that goes bad while leased is
 never handed to the next lessee, and a parked `acquire` given an `AbortSignal`

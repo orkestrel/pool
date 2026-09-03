@@ -1,6 +1,7 @@
 // The consumer-side guides-parity drop-in: runs `@orkestrel/guide`'s checks against
-// this repo's own `guides/README.md` manifest. The four constants below are this
-// package's own, and are the only part a sibling package changes.
+// this repo's own `guides/README.md` manifest. The constants below and the executed
+// `flagship fences` block are this package's own, and are the only parts a sibling
+// package changes.
 
 import { describe, expect, it } from 'vitest'
 import {
@@ -20,6 +21,7 @@ import {
 import { readFileSync } from 'node:fs'
 import { requireValue } from '@orkestrel/test'
 import { readInventory } from '@orkestrel/test/server'
+import { PoolError, isPoolError, isPoolMax, isPoolSignal } from '@src/core'
 
 /** Every fence language this package's guides are allowed to use. */
 const FENCE_LANGUAGES = Object.freeze(['text', 'ts'])
@@ -168,3 +170,34 @@ for (const entry of manifest) {
 		})
 	})
 }
+
+// The EXECUTED half. Every case above reads a name — from the guide text or from the source —
+// and a name that resolves proves nothing about the sentence beside it, so a fence whose
+// comment claims a value the code contradicts passes all of them. The cases here run the
+// flagship fence and assert the values its comments claim. Change a fence, change the
+// transcription beside it.
+describe('flagship fences', () => {
+	const guideText = requireValue(files['guides/pool.md'], 'Missing file: guides/pool.md')
+
+	it('answers from the public boundary guards the patterns fence documents', () => {
+		expect(isPoolMax(4)).toBe(true)
+		expect(isPoolMax(Number.POSITIVE_INFINITY)).toBe(false)
+		expect(isPoolSignal(new AbortController().signal)).toBe(true)
+
+		const failure = new PoolError({ code: 'destroyed' })
+
+		expect(isPoolError(failure)).toBe(true)
+		expect(failure.code).toBe('destroyed')
+	})
+
+	it('carries the boundary fence lines the transcription copies', () => {
+		// The presence guard beside the transcription: it proves the transcribed lines are still
+		// the documented ones, and nothing whatever about behavior. Every line carrying a claim is
+		// bound, so a comment cannot start claiming the opposite value and stay green.
+		expect(guideText).toContain('isPoolMax(4) // true')
+		expect(guideText).toContain('isPoolMax(Infinity) // false: omit max for unbounded capacity')
+		expect(guideText).toContain('isPoolSignal(new AbortController().signal) // true')
+		expect(guideText).toContain("const failure = new PoolError({ code: 'destroyed' })")
+		expect(guideText).toContain('if (isPoolError(failure)) console.error(failure.code)')
+	})
+})

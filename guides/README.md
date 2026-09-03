@@ -1,6 +1,6 @@
 # Guides
 
-A dual-axis index into this repository's guides — by concept, and by directory (AGENTS §22).
+A dual-axis index into this repository's guides — by concept, and by directory.
 
 ## By concept
 
@@ -30,6 +30,12 @@ surface (`Guide` / `Source`, the manifest and comparison helpers), not anything
 sourced in this repo; it is kept here so a reader of the parity suite can see
 the primitives it is built from without leaving this guide set.
 
+[`probe.md`](probe.md) and [`test.md`](test.md) are byte-identical mirrors of the
+guides for `@orkestrel/probe` and `@orkestrel/test` — the devDependencies behind
+this repo's probe project and test helpers. They document **those packages'**
+surfaces, not anything sourced in this repo; they are kept here for the same
+reason.
+
 ## See also
 
-- [`AGENTS.md`](../AGENTS.md) — the rules; §22 documentation-as-contracts.
+- [`AGENTS.md`](../AGENTS.md) — the repository's coding and documentation rules.
