@@ -1,6 +1,6 @@
 {
 	"name": "@orkestrel/pool",
-	"version": "0.0.9",
+	"version": "0.0.10",
 	"description": "A typed resource pool with optional bounded capacity, FIFO abort-cancellable waiting, validated idle reuse, and an observable lifecycle. Part of the @orkestrel line.",
 	"keywords": [
 		"connection-pool",
@@ -69,14 +69,14 @@
 		"test:setup": "vitest run --config vite.config.ts --no-cache --reporter=dot --project setup"
 	},
 	"dependencies": {
-		"@orkestrel/emitter": "^0.0.8"
+		"@orkestrel/emitter": "^0.0.9"
 	},
 	"devDependencies": {
 		"@microsoft/api-extractor": "^7.59.0",
-		"@orkestrel/guide": "^0.0.15",
+		"@orkestrel/guide": "^0.0.16",
 		"@orkestrel/probe": "^0.0.11",
-		"@orkestrel/scaffold": "^0.0.60",
-		"@orkestrel/test": "^0.0.12",
+		"@orkestrel/scaffold": "^0.0.61",
+		"@orkestrel/test": "^0.0.13",
 		"@types/node": "^26.4.0",
 		"oxfmt": "^0.65.0",
 		"oxlint": "^1.80.0",
