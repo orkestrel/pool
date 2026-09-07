@@ -1,17 +1,14 @@
 # @orkestrel/pool
 
-A typed **resource pool** with optional bounded capacity: idle reuse + FIFO
-waiting. `acquire` leases a resource — reusing a validated idle one, growing up
-to `max` when one is set, growing without bound when it is not, or parking on a
-FIFO waiter list until a `release` frees one — and the returned token's
-`release()` returns it for reuse (or hands it straight to the next waiter).
-The FIFO handoff is validated, so a resource that goes bad while leased is
-never handed to the next lessee, and a parked `acquire` given an `AbortSignal`
-rejects and de-queues itself when the signal fires — no leaked waiter. The
-pool is observable (a typed `emitter` surfaces `create` / `acquire` /
-`release` / `destroy`) and deliberately de-bloated — no warm-floor, no
-eviction timers. Environment-agnostic — no I/O, no browser or server
-assumptions. Part of the `@orkestrel` line.
+> A typed resource pool with optional bounded capacity, unique ownership, FIFO settlement,
+> validated reuse, caller-owned cancellation, explicit cleanup failures, and a stable
+> event-driven teardown barrier.
+
+Create a pool with the `createPool` function, hand it the hooks that make, check, and tear
+down one resource, and `await pool.acquire()` wherever the work needs one. Release the token
+in a `finally` block, and `await pool.destroy()` when the process is done with the pool.
+Environment-agnostic — no I/O, no browser or server assumptions. Part of the `@orkestrel`
+line.
 
 ## Install
 

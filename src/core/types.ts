@@ -1,9 +1,15 @@
 import type { EmitterErrorHandler, EmitterHooks, EmitterInterface } from '@orkestrel/emitter'
 
-/** Names the machine-readable failure codes produced by {@link PoolError}. */
+/**
+ * Names the machine-readable failure codes produced by {@link PoolError}: `invalid`, `destroyed`,
+ * `create`, and `cleanup`.
+ */
 export type PoolCode = 'invalid' | 'destroyed' | 'create' | 'cleanup'
 
-/** Represents the structured context attached to a {@link PoolError}. */
+/**
+ * Represents the structured context attached to a {@link PoolError}: the rejected input, or the
+ * distinct destroy-hook failures an aggregate cleanup collected.
+ */
 export interface PoolContext {
 	/** Holds the rejected public input, when the failure is an input-validation error. */
 	readonly value?: unknown
@@ -11,7 +17,10 @@ export interface PoolContext {
 	readonly failures?: readonly unknown[]
 }
 
-/** Represents the construction options for {@link PoolError}. */
+/**
+ * Represents the construction options for {@link PoolError}: the stable code, an optional cause,
+ * and optional structured context.
+ */
 export interface PoolErrorOptions {
 	/** Holds the stable machine-readable failure category. */
 	readonly code: PoolCode
@@ -21,7 +30,10 @@ export interface PoolErrorOptions {
 	readonly context?: PoolContext
 }
 
-/** Represents the observable resource lifecycle events emitted by a {@link PoolInterface}. */
+/**
+ * Represents the observable resource lifecycle events emitted by a {@link PoolInterface}:
+ * `create`, `acquire`, `release`, and `destroy`.
+ */
 export type PoolEventMap = {
 	/** Signals that a created resource entered pool ownership. */
 	readonly create: readonly []
@@ -33,16 +45,23 @@ export type PoolEventMap = {
 	readonly destroy: readonly []
 }
 
-/** Represents a unique lease over one pool-owned resource record. */
+/**
+ * Represents a unique lease over one pool-owned resource record, exposing that record as a readonly
+ * `value` and returning it through an idempotent `release`.
+ */
 export interface PoolToken<T> {
 	/** Holds the leased value. Duplicate values still belong to independent records. */
 	readonly value: T
-	/** Gives this exact lease back once; subsequent calls are no-ops. */
+	/**
+	 * Gives this exact record back to the pool once; a repeat call, and a call after teardown took
+	 * ownership, are no-ops.
+	 */
 	release(): void
 }
 
 /**
- * Represents the resource lifecycle options for {@link Pool} and `createPool`.
+ * Represents the resource lifecycle options for {@link Pool} and `createPool`: creation,
+ * destruction, validation, capacity, and observation.
  *
  * @remarks
  * `create` lazily produces resources. `destroy` tears down a claimed resource.
@@ -59,7 +78,10 @@ export interface PoolOptions<T> {
 	readonly max?: number
 }
 
-/** Represents a FIFO resource pool with optional bounded capacity and deterministic teardown. */
+/**
+ * Represents a FIFO resource pool with optional bounded capacity and deterministic teardown,
+ * exposing its record counts and a typed lifecycle emitter.
+ */
 export interface PoolInterface<T> {
 	/** Holds the typed synchronous lifecycle observation surface. */
 	readonly emitter: EmitterInterface<PoolEventMap>
@@ -70,7 +92,8 @@ export interface PoolInterface<T> {
 	/** Counts the records represented by unsettled released-once lease tokens. */
 	readonly active: number
 	/**
-	 * Queues and leases one resource in FIFO settlement order.
+	 * Queues the caller in FIFO order, validates an idle record or creates one, and settles queued
+	 * acquires in that same order.
 	 *
 	 * @param signal - Optional native cancellation signal
 	 * @returns A promise for the unique resource lease

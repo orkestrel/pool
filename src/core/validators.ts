@@ -1,5 +1,5 @@
 /**
- * Tests whether a value is a valid finite pool maximum.
+ * Tests whether a value is a positive safe integer, the only valid explicit pool maximum.
  *
  * @param value - The unknown maximum candidate
  * @returns True if the value is a positive safe integer; false otherwise

@@ -1,8 +1,8 @@
 import type { PoolErrorOptions } from './types.js'
 
 /**
- * Represents a stable, machine-readable pool failure with the original cause and structured
- * context.
+ * Represents a stable, machine-readable pool failure that retains the original thrown value as
+ * its cause without unsafe coercion, alongside structured context.
  *
  * @example
  * ```ts

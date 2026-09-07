@@ -2,7 +2,8 @@ import type { PoolInterface, PoolOptions } from './types.js'
 import { Pool } from './Pool.js'
 
 /**
- * Creates a resource pool with optional bounded capacity, unique ownership, and FIFO settlement.
+ * Creates a distinct {@link PoolInterface} from resource lifecycle hooks, with optional bounded
+ * capacity, unique ownership, and FIFO settlement.
  *
  * @remarks
  * Concurrent create and validation hooks may overlap, while acquire promises settle in
@@ -16,7 +17,7 @@ import { Pool } from './Pool.js'
  * @throws {@link PoolError} Thrown when `options.max` is present and is not a positive safe
  * integer, with `code: 'invalid'`. Construction validates it synchronously, before the pool exists.
  *
- * @example
+ * @example Create a pool
  * ```ts
  * import { createPool } from '@orkestrel/pool'
  *
