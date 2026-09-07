@@ -15,7 +15,8 @@ export function isPoolMax(value: unknown): value is number {
 }
 
 /**
- * Tests whether a value is a native `AbortSignal`, returning `false` for hostile proxies.
+ * Tests whether a value is a native `AbortSignal` for the acquire boundary, returning `false`
+ * for hostile proxies.
  *
  * @param value - The unknown signal candidate
  * @returns True if the value is a native `AbortSignal`; false otherwise

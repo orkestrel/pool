@@ -1,8 +1,7 @@
 import type { EmitterErrorHandler, EmitterHooks, EmitterInterface } from '@orkestrel/emitter'
 
 /**
- * Names the machine-readable failure codes produced by {@link PoolError}: `invalid`, `destroyed`,
- * `create`, and `cleanup`.
+ * Names the machine-readable failure codes produced by {@link PoolError}.
  */
 export type PoolCode = 'invalid' | 'destroyed' | 'create' | 'cleanup'
 
@@ -31,8 +30,7 @@ export interface PoolErrorOptions {
 }
 
 /**
- * Represents the observable resource lifecycle events emitted by a {@link PoolInterface}:
- * `create`, `acquire`, `release`, and `destroy`.
+ * Represents the observable resource lifecycle events emitted by a {@link PoolInterface}.
  */
 export type PoolEventMap = {
 	/** Signals that a created resource entered pool ownership. */
