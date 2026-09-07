@@ -9,10 +9,10 @@ import type { PoolEventMap } from '@src/core'
 // is this package's own event vocabulary, which names the second type argument
 // `createRecorders` cannot infer from an emitter.
 
-/** One observable lifecycle event name of a {@link PoolEventMap}. */
+/** Names one observable lifecycle event of a {@link PoolEventMap}. */
 export type PoolEvent = keyof PoolEventMap
 
-/** Every Pool lifecycle event, so a recorder bundle covers the whole event map. */
+/** Lists every Pool lifecycle event, so a recorder bundle covers the whole event map. */
 export const POOL_EVENTS: readonly PoolEvent[] = Object.freeze([
 	'create',
 	'acquire',
