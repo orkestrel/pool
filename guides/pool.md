@@ -16,6 +16,8 @@ class. Each created value receives an opaque ownership record, so duplicate prim
 
 ### Create a pool
 
+Construct a pool from create, destroy, and validate hooks, then acquire and release one token:
+
 ```ts
 import { createPool } from '@orkestrel/pool'
 
@@ -49,11 +51,13 @@ try {
 
 ### Guards
 
-| API            | Kind     | Summary                                                                                                          |
-| -------------- | -------- | ---------------------------------------------------------------------------------------------------------------- |
-| `isPoolError`  | function | Tests whether an unknown value is a `PoolError`, returning `false` for hostile proxies.                          |
-| `isPoolMax`    | function | Tests whether a value is a positive safe integer, the only valid explicit pool maximum.                          |
-| `isPoolSignal` | function | Tests whether a value is a native `AbortSignal` for the acquire boundary, returning `false` for hostile proxies. |
+In a guard table a `Shape` cell holds the type the guard narrows to.
+
+| API            | Kind     | Shape         | Summary                                                                                                          |
+| -------------- | -------- | ------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `isPoolError`  | function | `PoolError`   | Tests whether an unknown value is a `PoolError`, returning `false` for hostile proxies.                          |
+| `isPoolMax`    | function | `number`      | Tests whether a value is a positive safe integer, the only valid explicit pool maximum.                          |
+| `isPoolSignal` | function | `AbortSignal` | Tests whether a value is a native `AbortSignal` for the acquire boundary, returning `false` for hostile proxies. |
 
 ### Types
 
@@ -217,6 +221,8 @@ const pool = createPool({
 
 ### Validate public boundaries
 
+Check a candidate value or error against the public boundary guards before acting on it:
+
 ```ts
 import { PoolError, isPoolError, isPoolMax, isPoolSignal } from '@orkestrel/pool'
 
@@ -229,6 +235,8 @@ if (isPoolError(failure)) console.error(failure.code)
 ```
 
 ### Always release and explicitly tear down
+
+Release every acquired token and call `destroy()` explicitly after work finishes:
 
 ```ts
 import { Pool } from '@orkestrel/pool'
