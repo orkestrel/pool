@@ -72,16 +72,16 @@
 		"@orkestrel/emitter": "^0.0.10"
 	},
 	"devDependencies": {
-		"@microsoft/api-extractor": "^7.59.0",
+		"@microsoft/api-extractor": "^7.59.1",
 		"@orkestrel/guide": "^0.0.18",
 		"@orkestrel/probe": "^0.0.14",
 		"@orkestrel/scaffold": "^0.0.67",
 		"@orkestrel/test": "^0.0.14",
-		"@types/node": "^26.4.1",
-		"oxfmt": "^0.66.0",
-		"oxlint": "^1.81.0",
+		"@types/node": "^26.5.1",
+		"oxfmt": "^0.68.0",
+		"oxlint": "^1.83.0",
 		"typescript": "^6.0.3",
-		"vite": "^8.2.2",
+		"vite": "^8.3.0",
 		"vitest": "^4.1.11"
 	},
 	"engines": {
