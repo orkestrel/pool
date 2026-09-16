@@ -1,4 +1,5 @@
 import type { PoolErrorOptions } from './types.js'
+import { isError, isInstance, isString } from '@orkestrel/contract'
 
 /**
  * Represents a stable, machine-readable pool failure that retains the original thrown value as
@@ -31,15 +32,13 @@ export class PoolError extends Error {
 		if (options.code === 'destroyed') message = 'pool is destroyed'
 		if (options.code === 'create') message = 'pool create failed'
 		if (options.code === 'cleanup') message = 'pool cleanup failed'
-		try {
-			if (
-				options.cause instanceof Error &&
-				typeof options.cause.message === 'string' &&
-				options.cause.message.length > 0
-			) {
-				message = `${message}: ${options.cause.message}`
-			}
-		} catch {}
+		if (
+			isError(options.cause) &&
+			isString(options.cause.message) &&
+			options.cause.message.length > 0
+		) {
+			message = `${message}: ${options.cause.message}`
+		}
 		super(message, options.cause === undefined ? undefined : { cause: options.cause })
 		this.name = 'PoolError'
 		this.code = options.code
@@ -60,9 +59,5 @@ export class PoolError extends Error {
  * ```
  */
 export function isPoolError(value: unknown): value is PoolError {
-	try {
-		return value instanceof PoolError
-	} catch {
-		return false
-	}
+	return isInstance(value, PoolError)
 }

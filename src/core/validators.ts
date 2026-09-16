@@ -1,3 +1,5 @@
+import { holds, isFunction, isNumber } from '@orkestrel/contract'
+
 /**
  * Tests whether a value is a positive safe integer, the only valid explicit pool maximum.
  *
@@ -11,7 +13,7 @@
  * ```
  */
 export function isPoolMax(value: unknown): value is number {
-	return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+	return isNumber(value) && Number.isSafeInteger(value) && value > 0
 }
 
 /**
@@ -28,12 +30,10 @@ export function isPoolMax(value: unknown): value is number {
  * ```
  */
 export function isPoolSignal(value: unknown): value is AbortSignal {
-	try {
+	return holds(() => {
 		const getter = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get
-		if (getter === undefined) return false
+		if (!isFunction(getter)) return false
 		Reflect.apply(getter, value, [])
 		return true
-	} catch {
-		return false
-	}
+	})
 }
