@@ -319,6 +319,113 @@ describe('Pool floor', () => {
 })
 
 describe('Pool floor races', () => {
+	it('keeps attempts at two when a pending leased disposal fails on a spent floor', async () => {
+		const cleanup = Promise.withResolvers<void>()
+		const entered = Promise.withResolvers<void>()
+		const cause = new Error('leased disposal failed')
+		const reason = new Error('aborted during disposal')
+		const fixture = createFloorFixture({
+			min: 2,
+			restarts: 0,
+			destroy: (resource) => {
+				if (resource !== fixture.resources[0]) return
+				entered.resolve()
+				return cleanup.promise
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const token = await fixture.pool.acquire()
+			fixture.resources[1]?.loss.resolve()
+			await waitForDelay()
+			expect([fixture.attempts, fixture.pool.size]).toEqual([2, 1])
+			token.value.loss.resolve()
+			await entered.promise
+			const controller = new AbortController()
+			const acquiring = fixture.pool.acquire(controller.signal)
+			controller.abort(reason)
+			await expect(acquiring).rejects.toBe(reason)
+			cleanup.reject(cause)
+			await waitForDelay()
+			expect(fixture.attempts).toBe(2)
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create' })
+			expect([fixture.pool.size, fixture.pool.idle, fixture.pool.active]).toEqual([1, 0, 0])
+		} finally {
+			cleanup.reject(cause)
+			await expect(fixture.pool.destroy()).rejects.toMatchObject({ code: 'cleanup', cause })
+		}
+	})
+
+	it('grants the owed attempt after a refill spends the floor during leased disposal', async () => {
+		const cleanup = Promise.withResolvers<void>()
+		const entered = Promise.withResolvers<void>()
+		const refill = Promise.withResolvers<never>()
+		const cause = new Error('earlier slot refill failed')
+		let calls = 0
+		const fixture = createFloorFixture({
+			min: 3,
+			restarts: 2,
+			create: () => {
+				if (++calls === 4) return refill.promise
+				return { loss: Promise.withResolvers<void>() }
+			},
+			destroy: (resource) => {
+				if (resource !== fixture.resources[0]) return
+				entered.resolve()
+				return cleanup.promise
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const token = await fixture.pool.acquire()
+			fixture.resources[1]?.loss.resolve()
+			fixture.resources[2]?.loss.resolve()
+			token.value.loss.resolve()
+			await entered.promise
+			await waitForDelay()
+			expect([fixture.attempts, fixture.pool.size, fixture.pool.idle]).toEqual([4, 1, 0])
+			refill.reject(cause)
+			await waitForDelay()
+			expect(fixture.attempts).toBe(4)
+			cleanup.resolve()
+			await waitForDelay()
+			expect([fixture.attempts, fixture.pool.size, fixture.pool.idle]).toEqual([5, 1, 1])
+			const replacement = await fixture.pool.acquire()
+			expect(replacement.value).not.toBe(token.value)
+			replacement.release()
+		} finally {
+			refill.reject(cause)
+			cleanup.resolve()
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('rejects beside a retained record while another floor record is leased', async () => {
+		const cause = new Error('retained record cleanup')
+		const fixture = createFloorFixture({
+			min: 2,
+			destroy: (resource) => {
+				if (resource === fixture.resources[0]) throw cause
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const retained = await fixture.pool.acquire()
+			const live = await fixture.pool.acquire()
+			await expect(retained.destroy()).rejects.toMatchObject({ code: 'cleanup', cause })
+			await expect(retained.destroy()).resolves.toBeUndefined()
+			expect([fixture.pool.size, fixture.pool.idle, fixture.pool.active]).toEqual([2, 0, 1])
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'cleanup', cause })
+			live.release()
+			const next = await fixture.pool.acquire()
+			expect(next.value).toBe(live.value)
+			next.release()
+			expect([fixture.attempts, fixture.destroyed.length]).toEqual([2, 1])
+		} finally {
+			await expect(fixture.pool.destroy()).rejects.toMatchObject({ code: 'cleanup', cause })
+		}
+	})
+
 	it('rejects an acquire when retained cleanup blocks the floor', async () => {
 		const cause = new Error('blocked floor')
 		const fixture = createFloorFixture({
@@ -536,7 +643,7 @@ describe('Pool floor races', () => {
 		}
 	})
 
-	it('withdraws owed credit when leased cleanup fails', async () => {
+	it('grants no owed credit when leased cleanup fails', async () => {
 		const cause = new Error('failed leased cleanup')
 		const fixture = createFloorFixture({
 			min: 2,

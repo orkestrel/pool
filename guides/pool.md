@@ -5,8 +5,9 @@
 
 The pool supports lazy creation or a warm floor, with no eviction timer, acquire timeout,
 or polling loop. Waits park on promises or signal listeners. An acquire rejects with
-`cleanup` when retained records block the floor, nothing is idle, and no refill or disposal
-is pending. The lifecycle hooks are the caller's, so the engine itself performs no I/O.
+`cleanup` when a floor retains a record, owns `min` records, has nothing idle, and has no
+refill or disposal pending, even with live leases. The lifecycle hooks are the caller's,
+so the engine itself performs no I/O.
 
 ## Surface
 
@@ -138,23 +139,26 @@ When strikes exceed `restarts`, the floor is spent. With `restarts: 1`, the firs
 create permits another attempt, and the second refuses the next attempt. `start()` rejects
 with `create` and the last cause; another `start()` resets the strikes. While the floor is
 spent, an acquire without an idle record rejects with `create` after pending refills and
-disposal settle. If retained records fill the capacity instead, that acquire rejects with
-`cleanup`. A spent floor and a rejected `start()` still serve their live records. A loss
-without a thrown cause leaves that cause undefined.
+disposal settle. If the floor retains a record and owns `min` records, that acquire rejects
+with `cleanup` instead, even with live leases. A spent floor and a rejected `start()` still
+serve their live records. A loss without a thrown cause leaves that cause undefined.
 
 A record lost while leased earns one refill attempt even after the bound is spent.
-That attempt remains owed during a concurrent refill and never resets the strikes. Its failed
-create adds a strike; its success alone does not reset the strikes. A record that was leased
+The credit becomes spendable only when successful disposal removes the record; failed disposal
+grants no credit. That attempt remains owed during a concurrent refill and never resets the strikes.
+Its failed create adds a strike; its success alone does not reset the strikes. A record that was leased
 and later released adds no strike when lost. `token.destroy()` disposes the exact leased
 record, waits for an existing cleanup attempt, and rejects with `cleanup` if disposal fails.
 A token ends once: after `release()` or `destroy()`, the other call does nothing. Repeating
-either call does nothing.
+either call does nothing. A repeat `token.destroy()` after a `cleanup` rejection resolves
+while the record stays retained.
 
 Under `min`, a failed destroy hook leaves its record counted against `max` and excluded from
 idle and active counts. The pool never replaces that retained record or retries its destroy
 hook. The pool can run short; `start()` rejects with `cleanup` if retained records prevent
-filling. An acquire with nothing idle also rejects with `cleanup` when retained records fill
-the floor's capacity and no refill or disposal is pending. The terminal `destroy()` barrier
+filling. An acquire rejects with `cleanup` when the floor retains a record, owns `min` records,
+has nothing idle, and has no refill or disposal pending, even with live leases. The cause is
+the retained record's own cleanup failure. The terminal `destroy()` barrier
 reports the original cleanup failures. Without `min`, cleanup retains its lazy behavior and
 frees capacity after either hook outcome.
 

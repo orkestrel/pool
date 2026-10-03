@@ -38,7 +38,8 @@ export class Pool<T> implements PoolInterface<T> {
 	readonly #watches = new Map<object, AbortController>()
 	readonly #used = new WeakSet<object>()
 	readonly #settled = new WeakSet<object>()
-	readonly #survivors = new Set<object>()
+	readonly #survivors = new Map<object, unknown>()
+	readonly #owing = new Set<object>()
 	readonly #emitter: Emitter<PoolEventMap>
 	readonly #resources = new Map<object, T>()
 	readonly #available: object[] = []
@@ -169,9 +170,10 @@ export class Pool<T> implements PoolInterface<T> {
 	 * that handles failures with `.catch()` alone misses it.
 	 * @throws {@link PoolError} Thrown as a rejection when `destroy()` has already begun, with
 	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an idle record,
-	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or retained
-	 * records block a floor with nothing idle, no refill running, and no disposal pending,
-	 * with `code: 'cleanup'`. A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
+	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or
+	 * a floor retains a record, owns `min` records, has nothing idle, and has no refill or disposal
+	 * pending, even with live leases, with `code: 'cleanup'` and the retained cleanup failure as cause.
+	 * A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
 	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>> {
 		if (signal !== undefined && !isPoolSignal(signal)) {
@@ -355,7 +357,11 @@ export class Pool<T> implements PoolInterface<T> {
 					) {
 						this.#ready.set(waiter, {
 							success: false,
-							error: this.#cleanupError(this.#failures),
+							error: new PoolError({
+								code: 'cleanup',
+								cause: this.#survivors.values().next().value,
+								context: { failures: [...this.#failures] },
+							}),
 						})
 						continue
 					}
@@ -404,18 +410,11 @@ export class Pool<T> implements PoolInterface<T> {
 			this.#refilling = true
 			const operation = Promise.resolve().then(() => this.#refill())
 			this.#operations.add(operation)
-			void operation.then(
-				() => {
-					this.#refilling = false
-					this.#completeOperation(operation)
-				},
-				(error: unknown) => {
-					this.#strikes += 1
-					this.#cause = error
-					this.#refilling = false
-					this.#completeOperation(operation)
-				},
-			)
+			// Refill never rejects: create failures are caught, and watch/emitter callbacks isolate errors.
+			void operation.then(() => {
+				this.#refilling = false
+				this.#completeOperation(operation)
+			})
 			return
 		}
 		if (this.#destroying.size > 0) return
@@ -474,13 +473,11 @@ export class Pool<T> implements PoolInterface<T> {
 			this.#survivors.has(record)
 		)
 			return
-		const owed = this.#leased.has(record) && this.#min !== undefined
-		if (owed) this.#owed += 1
+		if (this.#leased.has(record) && this.#min !== undefined) this.#owing.add(record)
 		this.#strike(record, cause)
 		try {
 			await this.#dispose(record)
 		} catch (error: unknown) {
-			if (owed) this.#owed -= 1
 			this.#pump()
 			throw error
 		}
@@ -755,9 +752,13 @@ export class Pool<T> implements PoolInterface<T> {
 			failed = true
 		}
 		if (failed && this.#min !== undefined) {
-			this.#survivors.add(record)
+			this.#survivors.set(record, failure)
 			this.#record(failure)
-		} else this.#resources.delete(record)
+		} else {
+			this.#resources.delete(record)
+			if (this.#owing.has(record)) this.#owed += 1
+		}
+		this.#owing.delete(record)
 		if (failed) cleanup.reject(failure)
 		else cleanup.resolve()
 		// Cleanup owners must bind outcomes before destroy observers can reenter.

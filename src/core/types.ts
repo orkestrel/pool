@@ -128,9 +128,10 @@ export interface PoolInterface<T> {
 	 * that handles failures with `.catch()` alone misses it.
 	 * @throws {@link PoolError} Thrown as a rejection when `destroy()` has already begun, with
 	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an idle record,
-	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or retained
-	 * records block a floor with nothing idle, no refill running, and no disposal pending,
-	 * with `code: 'cleanup'`. A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
+	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or
+	 * a floor retains a record, owns `min` records, has nothing idle, and has no refill or disposal
+	 * pending, even with live leases, with `code: 'cleanup'` and the retained cleanup failure as cause.
+	 * A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
 	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>>
 	/**
