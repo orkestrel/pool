@@ -1,7 +1,7 @@
 {
 	"name": "@orkestrel/pool",
 	"version": "0.0.14",
-	"description": "A typed resource pool with optional bounded capacity, FIFO abort-cancellable waiting, validated idle reuse, and an observable lifecycle. Part of the @orkestrel line.",
+	"description": "A typed resource pool with optional bounded capacity, a warm floor, bounded loss recovery, FIFO abort-cancellable waiting, validated idle reuse, and an observable lifecycle. Part of the @orkestrel line.",
 	"keywords": [
 		"connection-pool",
 		"fifo",

@@ -51,15 +51,15 @@ export interface PoolToken<T> {
 	/** Holds the leased value. Duplicate values still belong to independent records. */
 	readonly value: T
 	/**
-	 * Gives this exact record back to the pool once; a repeat call, and a call after teardown took
-	 * ownership, are no-ops.
+	 * Gives this exact record back to the pool once; a repeat call, and a call after loss or teardown
+	 * took ownership, are no-ops.
 	 */
 	release(): void
 	/**
 	 * Destroys this exact record instead of returning it; a repeat call, and a call after release,
 	 * are no-ops.
 	 *
-	 * @returns A promise for this record's cleanup attempt
+	 * @returns A promise for this record's cleanup attempt, including an attempt already in progress
 	 * @throws {@link PoolError} Thrown as a rejection with `code: 'cleanup'` when disposal fails.
 	 */
 	destroy(): Promise<void>
@@ -74,11 +74,13 @@ export interface PoolToken<T> {
  * `destroy` tears down a claimed resource. `validate` checks an owned resource before reuse.
  * `min` and `max` are positive safe integers and must be equal when both are set; `max`
  * defaults to `min`. Omitting both leaves capacity unbounded. `restarts` is required with
- * `min`, is refused without `min`, has no default, and is a non-negative safe integer. A failed refill or loss of a
- * never-leased record adds a strike; a lease grant resets strikes. Exceeding `restarts`
- * stops refills until `start()`, except for one attempt owed to each lost leased record.
+ * `min`, is refused without `min`, has no default, and is a non-negative safe integer.
+ * A failed refill or loss of a never-leased record adds a strike; a lease grant resets the
+ * strikes. Exceeding `restarts` stops refills until `start()`, except for one attempt owed
+ * to each lost leased record.
  * `watch` settles on loss and receives a signal aborted when disposal begins. Its rejection
- * reaches `error` with event `watch`. `on` installs initial emitter listeners; `error`
+ * reaches `error` with event `watch` only while the record is live. Any settlement after
+ * the signal aborts is ignored. `on` installs initial emitter listeners; `error`
  * also receives isolated listener failures.
  */
 export interface PoolOptions<T> {
@@ -107,7 +109,7 @@ export interface PoolInterface<T> {
 	/** Counts the records represented by unsettled released-once lease tokens. */
 	readonly active: number
 	/**
-	 * Fills the warm floor and restarts a spent refill bound; without a floor, resolves immediately.
+	 * Fills the warm floor and resets the strikes of a spent floor; without a floor, resolves immediately.
 	 *
 	 * @returns A promise that resolves when the floor owns `min` live records
 	 * @throws {@link PoolError} Thrown as a rejection with `code: 'create'` and the last cause
@@ -126,13 +128,13 @@ export interface PoolInterface<T> {
 	 * that handles failures with `.catch()` alone misses it.
 	 * @throws {@link PoolError} Thrown as a rejection when `destroy()` has already begun, with
 	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an idle record,
-	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails,
-	 * with `code: 'cleanup'`. A
-	 * `signal` that aborts rejects with the caller's exact `signal.reason` instead.
+	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or retained
+	 * records block a floor with nothing idle, no refill running, and no disposal pending,
+	 * with `code: 'cleanup'`. A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
 	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>>
 	/**
-	 * Destroys the records that are idle at this call's synchronous snapshot and restores an active floor.
+	 * Destroys the records that are idle at this call's synchronous snapshot and restores a started floor.
 	 *
 	 * @returns A promise that settles after every snapshot cleanup attempt
 	 * @throws {@link PoolError} Thrown when `destroy()` has already begun, with `code: 'destroyed'`.

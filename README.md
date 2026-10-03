@@ -9,9 +9,11 @@ in a `finally` block, and `await pool.destroy()` when the process is done with t
 Environment-agnostic — no I/O, no browser or server assumptions. Part of the `@orkestrel`
 line.
 
-For eager resources, set `min` and the required `restarts` bound, then call `start()`.
+For eager resources, set `min` and the required `restarts` bound on failed refills and losses
+of never-leased records between strike resets, then call `start()`.
 The `watch(value, signal)` hook reports loss; a holder can also call its token's `destroy()`.
-The pool disposes lost records before replacing them and retains capacity when cleanup fails.
+The pool disposes lost records before replacing them and keeps a record whose cleanup fails
+counted against `max`.
 
 ## Install
 

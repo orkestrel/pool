@@ -6,9 +6,9 @@ import { PoolError } from './errors.js'
 import { isPoolMax, isPoolSignal } from './validators.js'
 
 /**
- * Represents a capacity-aware resource pool whose opaque ownership records preserve FIFO
- * settlement, cancellation, exact lease release, and deterministic teardown under concurrent
- * hooks.
+ * Represents a resource pool with optional bounded capacity and a warm floor, whose opaque
+ * ownership records preserve FIFO settlement, cancellation, exact lease release, and
+ * deterministic teardown under concurrent hooks.
  *
  * @typeParam T - The pooled resource value
  *
@@ -139,7 +139,7 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	/**
-	 * Fills the warm floor and restarts a spent refill bound; without a floor, resolves immediately.
+	 * Fills the warm floor and resets the strikes of a spent floor; without a floor, resolves immediately.
 	 *
 	 * @returns A promise that resolves when the floor owns `min` live records
 	 * @throws {@link PoolError} Thrown as a rejection with `code: 'create'` and the last cause
@@ -169,9 +169,9 @@ export class Pool<T> implements PoolInterface<T> {
 	 * that handles failures with `.catch()` alone misses it.
 	 * @throws {@link PoolError} Thrown as a rejection when `destroy()` has already begun, with
 	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an idle record,
-	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails,
-	 * with `code: 'cleanup'`. A
-	 * `signal` that aborts rejects with the caller's exact `signal.reason` instead.
+	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or retained
+	 * records block a floor with nothing idle, no refill running, and no disposal pending,
+	 * with `code: 'cleanup'`. A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
 	 */
 	acquire(signal?: AbortSignal): Promise<PoolToken<T>> {
 		if (signal !== undefined && !isPoolSignal(signal)) {
@@ -197,7 +197,7 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	/**
-	 * Destroys the records that are idle at this call's synchronous snapshot and restores an active floor.
+	 * Destroys the records that are idle at this call's synchronous snapshot and restores a started floor.
 	 *
 	 * @returns A promise that settles after every snapshot cleanup attempt
 	 * @throws {@link PoolError} Thrown when `destroy()` has already begun, with `code: 'destroyed'`.
@@ -298,7 +298,7 @@ export class Pool<T> implements PoolInterface<T> {
 		return (): Promise<void> => {
 			if (this.#settled.has(lease)) return Promise.resolve()
 			this.#settled.add(lease)
-			return this.#lose(record).catch((error: unknown) => {
+			return (this.#destroying.get(record) ?? this.#lose(record)).catch((error: unknown) => {
 				throw new PoolError({ code: 'cleanup', cause: error })
 			})
 		}
@@ -348,6 +348,18 @@ export class Pool<T> implements PoolInterface<T> {
 				}
 				if (this.#min !== undefined) {
 					if (
+						!this.#refilling &&
+						this.#destroying.size === 0 &&
+						this.#resources.size >= this.#min &&
+						this.#survivors.size > 0
+					) {
+						this.#ready.set(waiter, {
+							success: false,
+							error: this.#cleanupError(this.#failures),
+						})
+						continue
+					}
+					if (
 						this.#spent() &&
 						!this.#refilling &&
 						this.#destroying.size === 0 &&
@@ -392,10 +404,18 @@ export class Pool<T> implements PoolInterface<T> {
 			this.#refilling = true
 			const operation = Promise.resolve().then(() => this.#refill())
 			this.#operations.add(operation)
-			void operation.then(() => {
-				this.#refilling = false
-				this.#completeOperation(operation)
-			})
+			void operation.then(
+				() => {
+					this.#refilling = false
+					this.#completeOperation(operation)
+				},
+				(error: unknown) => {
+					this.#strikes += 1
+					this.#cause = error
+					this.#refilling = false
+					this.#completeOperation(operation)
+				},
+			)
 			return
 		}
 		if (this.#destroying.size > 0) return
@@ -410,6 +430,7 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	async #refill(): Promise<void> {
+		if (this.#ending !== undefined) return
 		let value: T
 		try {
 			value = await this.#create()
@@ -435,6 +456,7 @@ export class Pool<T> implements PoolInterface<T> {
 			void settled.then(
 				() => this.#own(this.#lose(record)),
 				(error: unknown) => {
+					if (controller.signal.aborted) return
 					this.#own(this.#lose(record, error))
 					attempt(() => this.#error?.(error, 'watch'))
 				},
@@ -452,15 +474,16 @@ export class Pool<T> implements PoolInterface<T> {
 			this.#survivors.has(record)
 		)
 			return
-		const leased = this.#leased.has(record)
+		const owed = this.#leased.has(record) && this.#min !== undefined
+		if (owed) this.#owed += 1
 		this.#strike(record, cause)
 		try {
 			await this.#dispose(record)
 		} catch (error: unknown) {
+			if (owed) this.#owed -= 1
 			this.#pump()
 			throw error
 		}
-		if (leased && this.#min !== undefined) this.#owed += 1
 		this.#pump()
 	}
 

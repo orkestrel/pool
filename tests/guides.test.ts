@@ -39,6 +39,7 @@ await new GuideCommand({
 	const { requireValue } = await import('@orkestrel/test')
 	const { createPool, PoolError, isPoolError, isPoolMax, isPoolSignal } = await import('@src/core')
 	const { describe, expect, it } = await import('vitest')
+	const { getEventListeners } = await import('node:events')
 	const own = requireValue(
 		rows.find((row) => row.entry.spec === GUIDE_SPEC),
 		`Missing manifest row: ${GUIDE_SPEC}`,
@@ -157,18 +158,47 @@ await new GuideCommand({
 		const guideText = requireValue(files[GUIDE_SPEC], `Missing file: ${GUIDE_SPEC}`)
 
 		it('warms and destroys the floor example through its public contract', async () => {
-			const pool = createPool({ create: () => new Uint8Array(64), min: 1, restarts: 1 })
+			const pool = createPool({
+				create: () => new EventTarget(),
+				min: 1,
+				restarts: 1,
+				watch: (resource, signal) =>
+					new Promise<void>((resolve) => {
+						resource.addEventListener('loss', () => resolve(), { once: true, signal })
+						signal.addEventListener('abort', () => resolve(), { once: true })
+					}),
+			})
 			try {
 				await pool.start()
 				expect(pool.idle).toBe(1)
 				const token = await pool.acquire()
-				expect(token.value.byteLength).toBe(64)
+				expect(getEventListeners(token.value, 'loss')).toHaveLength(1)
 				await token.destroy()
+				expect(getEventListeners(token.value, 'loss')).toEqual([])
 				expect(pool.active).toBe(0)
 			} finally {
 				await pool.destroy()
 			}
 			expect(pool.size).toBe(0)
+		})
+
+		it('carries every floor fence line in execution order', () => {
+			expect(guideText).toContain(`import { createPool } from '@orkestrel/pool'
+
+const pool = createPool({
+	create: () => new EventTarget(),
+	min: 1,
+	restarts: 1,
+	watch: (resource, signal) =>
+		new Promise<void>((resolve) => {
+			resource.addEventListener('loss', () => resolve(), { once: true, signal })
+			signal.addEventListener('abort', () => resolve(), { once: true })
+		}),
+})
+await pool.start()
+const token = await pool.acquire()
+await token.destroy()
+await pool.destroy()`)
 		})
 
 		it('answers from the public boundary guards the patterns fence documents', () => {
