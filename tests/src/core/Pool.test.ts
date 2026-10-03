@@ -7,8 +7,650 @@ import { Pool, PoolError, isPoolError, isPoolSignal } from '@src/core'
 // registers through `AbortSignal.prototype.addEventListener`, which bypasses them, so its tally
 // stays 0 here whatever the pool does. Do not swap this import back.
 import { getEventListeners } from 'node:events'
-import { createRecorder, createRecorders } from '@orkestrel/test'
-import { POOL_EVENTS } from '../../setup.js'
+import { createRecorder, createRecorders, waitForDelay } from '@orkestrel/test'
+import { POOL_EVENTS, createFloorFixture } from '../../setup.js'
+
+describe('Pool floor', () => {
+	it('validates min, matching max, and the required restart bound', () => {
+		for (const min of [0, -0, -1, 1.5, Number.NaN, Infinity, 2 ** 53]) {
+			expect(() => new Pool({ create: () => 0, min, restarts: 1 })).toThrow(
+				expect.objectContaining({ code: 'invalid' }),
+			)
+		}
+		for (const max of [1, 3]) {
+			expect(() => new Pool({ create: () => 0, min: 2, max, restarts: 1 })).toThrow(
+				expect.objectContaining({ code: 'invalid' }),
+			)
+		}
+		expect(() => new Pool({ create: () => 0, min: 1 })).toThrow(
+			expect.objectContaining({ code: 'invalid' }),
+		)
+		for (const restarts of [-1, 0.5, Number.NaN, Infinity, 2 ** 53]) {
+			expect(() => new Pool({ create: () => 0, min: 1, restarts })).toThrow(
+				expect.objectContaining({ code: 'invalid' }),
+			)
+		}
+		for (const restarts of [0, -0, 1, Number.MAX_SAFE_INTEGER]) {
+			expect(() => new Pool({ create: () => 0, min: 1, restarts })).not.toThrow()
+		}
+	})
+
+	it('creates only after start, defaults max to min, and emits release for refills', async () => {
+		const fixture = createFloorFixture({ min: 2 })
+		const releases = createRecorder<[]>()
+		fixture.pool.emitter.on('release', releases.handler)
+		try {
+			expect(fixture.attempts).toBe(0)
+			await fixture.pool.start()
+			await fixture.pool.start()
+			expect([fixture.attempts, fixture.pool.size, fixture.pool.idle, releases.count]).toEqual([
+				2, 2, 2, 2,
+			])
+			const first = await fixture.pool.acquire()
+			const second = await fixture.pool.acquire()
+			const third = fixture.pool.acquire()
+			first.release()
+			const next = await third
+			expect(fixture.attempts).toBe(2)
+			next.release()
+			second.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('does not create for an acquire before start', async () => {
+		const fixture = createFloorFixture()
+		const pending = fixture.pool.acquire()
+		void pending.catch(() => {})
+		try {
+			await Promise.resolve()
+			expect(fixture.attempts).toBe(0)
+			await fixture.pool.start()
+			const token = await pending
+			expect(fixture.attempts).toBe(1)
+			token.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('pins the last allowed failure and first refused refill with a queued acquire', async () => {
+		const first = Promise.withResolvers<number>()
+		const second = Promise.withResolvers<number>()
+		const entered = Promise.withResolvers<void>()
+		const cause = new Error('last refill')
+		let calls = 0
+		const pool = new Pool({
+			min: 1,
+			restarts: 1,
+			create: () => {
+				calls += 1
+				if (calls === 1) return first.promise
+				entered.resolve()
+				return second.promise
+			},
+		})
+		try {
+			const starting = pool.start()
+			const acquiring = pool.acquire()
+			void starting.catch(() => {})
+			void acquiring.catch(() => {})
+			first.reject(new Error('first refill'))
+			await Promise.race([entered.promise, starting])
+			expect(calls).toBe(2)
+			second.reject(cause)
+			await expect(starting).rejects.toMatchObject({ code: 'create', cause })
+			await expect(acquiring).rejects.toMatchObject({ code: 'create', cause })
+			await expect(pool.acquire()).rejects.toMatchObject({ code: 'create', cause })
+			expect(calls).toBe(2)
+		} finally {
+			await pool.destroy()
+		}
+	})
+
+	it('restarts a spent floor and resets strikes on a granted lease', async () => {
+		let fails = true
+		const fixture = createFloorFixture({
+			restarts: 0,
+			create: () => {
+				if (fails) throw new Error('refill')
+				return { loss: Promise.withResolvers<void>() }
+			},
+		})
+		try {
+			await expect(fixture.pool.start()).rejects.toMatchObject({ code: 'create' })
+			fails = false
+			await fixture.pool.start()
+			const token = await fixture.pool.acquire()
+			await token.destroy()
+			await fixture.pool.start()
+			expect(fixture.attempts).toBe(3)
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('disposes idle loss once and waits for cleanup before refilling', async () => {
+		const cleanup = Promise.withResolvers<void>()
+		const entered = Promise.withResolvers<void>()
+		const fixture = createFloorFixture({
+			destroy: () => {
+				entered.resolve()
+				return cleanup.promise
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const resource = fixture.resources[0]
+			expect(resource).toBeDefined()
+			resource?.loss.resolve()
+			resource?.loss.reject(new Error('duplicate settle'))
+			await entered.promise
+			expect([fixture.attempts, fixture.pool.size, fixture.pool.idle]).toEqual([1, 1, 0])
+			expect(resource === undefined ? undefined : fixture.signals.get(resource)?.aborted).toBe(true)
+			const pending = fixture.pool.acquire()
+			cleanup.resolve()
+			const token = await pending
+			expect(token.value).not.toBe(resource)
+			expect([fixture.attempts, fixture.destroyed.length]).toEqual([2, 1])
+			token.release()
+		} finally {
+			cleanup.resolve()
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('destroys an exact lease and makes repeat destroy and later release no-ops', async () => {
+		const fixture = createFloorFixture({ min: 2 })
+		try {
+			await fixture.pool.start()
+			const token = await fixture.pool.acquire()
+			await token.destroy()
+			await token.destroy()
+			token.release()
+			await fixture.pool.start()
+			expect(fixture.signals.get(token.value)?.aborted).toBe(true)
+			expect(fixture.destroyed).toEqual([token.value])
+			expect([fixture.pool.active, fixture.pool.idle, fixture.attempts]).toEqual([0, 2, 3])
+			const released = await fixture.pool.acquire()
+			released.release()
+			await released.destroy()
+			expect(fixture.destroyed).toEqual([token.value])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('loses a leased record through watch and ignores its stale release', async () => {
+		const fixture = createFloorFixture({ restarts: 0 })
+		try {
+			await fixture.pool.start()
+			const token = await fixture.pool.acquire()
+			const pending = fixture.pool.acquire()
+			token.value.loss.resolve()
+			const replacement = await pending
+			token.release()
+			expect([fixture.pool.active, fixture.attempts]).toEqual([1, 2])
+			expect(fixture.destroyed).toEqual([token.value])
+			replacement.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('reports rejected watches to error and isolates a throwing error handler', async () => {
+		const errors = createRecorder<readonly [unknown, string]>()
+		const cause = new Error('watch')
+		const fixture = createFloorFixture({
+			error: (error, event) => {
+				errors.handler(error, event)
+				throw new Error('observer')
+			},
+		})
+		try {
+			await fixture.pool.start()
+			fixture.resources[0]?.loss.reject(cause)
+			await Promise.resolve()
+			const token = await fixture.pool.acquire()
+			expect(errors.calls).toEqual([[cause, 'watch']])
+			expect(fixture.attempts).toBe(2)
+			token.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('aborts watch on clear and refills without an acquire', async () => {
+		const fixture = createFloorFixture()
+		try {
+			await fixture.pool.start()
+			const resource = fixture.resources[0]
+			const clearing = fixture.pool.clear()
+			expect(resource === undefined ? undefined : fixture.signals.get(resource)?.aborted).toBe(true)
+			await clearing
+			await fixture.pool.start()
+			expect([fixture.attempts, fixture.pool.idle]).toEqual([2, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('aborts watch when validation refuses a record', async () => {
+		let checks = 0
+		const fixture = createFloorFixture({ validate: () => ++checks > 1 })
+		try {
+			await fixture.pool.start()
+			const resource = fixture.resources[0]
+			const token = await fixture.pool.acquire()
+			expect(resource === undefined ? undefined : fixture.signals.get(resource)?.aborted).toBe(true)
+			expect(fixture.destroyed).toEqual([resource])
+			expect(fixture.attempts).toBe(2)
+			token.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('aborts every watch when pool destruction begins', async () => {
+		const fixture = createFloorFixture({ min: 2 })
+		await fixture.pool.start()
+		const ending = fixture.pool.destroy()
+		expect([...fixture.signals.values()].map((signal) => signal.aborted)).toEqual([true, true])
+		await ending
+		expect([fixture.attempts, fixture.pool.size]).toEqual([2, 0])
+	})
+
+	it('retains failed cleanup against max and rejects destruction with cleanup', async () => {
+		const cause = new Error('survivor')
+		const fixture = createFloorFixture({
+			destroy: () => {
+				throw cause
+			},
+		})
+		await fixture.pool.start()
+		const token = await fixture.pool.acquire()
+		await expect(token.destroy()).rejects.toMatchObject({ code: 'cleanup', cause })
+		expect([fixture.pool.size, fixture.pool.idle, fixture.pool.active, fixture.attempts]).toEqual([
+			1, 0, 0, 1,
+		])
+		await expect(fixture.pool.start()).rejects.toMatchObject({ code: 'cleanup' })
+		await expect(fixture.pool.destroy()).rejects.toMatchObject({
+			code: 'cleanup',
+			context: { failures: [cause] },
+		})
+		expect([fixture.attempts, fixture.destroyed.length, fixture.pool.size]).toEqual([1, 1, 1])
+	})
+
+	it('destroys late floor creates and rejects start during teardown', async () => {
+		const created = Promise.withResolvers<number>()
+		const entered = Promise.withResolvers<void>()
+		const disposed = createRecorder<readonly [number]>()
+		const pool = new Pool({
+			min: 1,
+			restarts: 1,
+			create: () => {
+				entered.resolve()
+				return created.promise
+			},
+			destroy: disposed.handler,
+		})
+		const starting = pool.start()
+		void starting.catch(() => {})
+		await entered.promise
+		const ending = pool.destroy()
+		created.resolve(7)
+		await expect(starting).rejects.toMatchObject({ code: 'destroyed' })
+		await ending
+		expect(disposed.calls).toEqual([[7]])
+		expect([pool.size, pool.emitter.destroyed]).toEqual([0, true])
+		await expect(pool.start()).rejects.toMatchObject({ code: 'destroyed' })
+	})
+
+	it('starts a pool without min immediately without creating', async () => {
+		const create = createRecorder<[]>()
+		const pool = new Pool({ create: create.handler })
+		await pool.start()
+		expect(create.count).toBe(0)
+		const token = await pool.acquire()
+		await token.destroy()
+		expect([pool.size, create.count]).toEqual([0, 1])
+		await pool.destroy()
+	})
+})
+
+describe('Pool floor races', () => {
+	it('keeps capacity bounded at each empty-payload event and exposes only the token contract', async () => {
+		const fixture = createFloorFixture({ min: 2 })
+		const events = createRecorders<PoolEventMap, PoolEvent>(fixture.pool.emitter, POOL_EVENTS)
+		const sizes: number[] = []
+		for (const event of POOL_EVENTS) {
+			fixture.pool.emitter.on(event, () => sizes.push(fixture.pool.size))
+		}
+		try {
+			await fixture.pool.start()
+			const token = await fixture.pool.acquire()
+			expect(Object.keys(token).sort()).toEqual(['destroy', 'release', 'value'])
+			await token.destroy()
+			await fixture.pool.start()
+			await fixture.pool.clear()
+			await fixture.pool.start()
+			expect(Math.max(...sizes)).toBe(2)
+			for (const event of POOL_EVENTS) {
+				expect(events[event].count).toBeGreaterThan(0)
+				expect(events[event].calls.every((args) => args.length === 0)).toBe(true)
+			}
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('ignores an old token destroy after the same record is leased again', async () => {
+		const fixture = createFloorFixture()
+		try {
+			await fixture.pool.start()
+			const first = await fixture.pool.acquire()
+			first.release()
+			const next = await fixture.pool.acquire()
+			await first.destroy()
+			expect([fixture.pool.active, fixture.attempts, fixture.destroyed.length]).toEqual([1, 1, 0])
+			expect(next.value).toBe(first.value)
+			next.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('ignores watches settling because their disposal signal aborted', async () => {
+		const fixture = createFloorFixture({
+			restarts: 0,
+			watch: (resource, signal) => {
+				signal.addEventListener('abort', () => resource.loss.resolve(), { once: true })
+				return resource.loss.promise
+			},
+		})
+		try {
+			await fixture.pool.start()
+			await fixture.pool.clear()
+			await fixture.pool.start()
+			expect([fixture.attempts, fixture.pool.idle, fixture.destroyed.length]).toEqual([2, 1, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('supports watch loss in a lazy pool without warming a replacement', async () => {
+		const loss = Promise.withResolvers<void>()
+		const destroyed = Promise.withResolvers<void>()
+		const creates = createRecorder<[]>()
+		const pool = new Pool({
+			create: creates.handler,
+			watch: () => loss.promise,
+			destroy: () => destroyed.resolve(),
+		})
+		try {
+			const token = await pool.acquire()
+			loss.resolve()
+			await destroyed.promise
+			await waitForDelay()
+			token.release()
+			expect([creates.count, pool.size, pool.active]).toEqual([1, 0, 0])
+		} finally {
+			await pool.destroy()
+		}
+	})
+
+	it('rejects a restart bound without min and a non-callable watch', () => {
+		expect(() => new Pool({ create: () => 0, restarts: 1 })).toThrow(
+			expect.objectContaining({ code: 'invalid' }),
+		)
+		expect(() => Reflect.construct(Pool, [{ create: () => 0, watch: 3 }])).toThrow(
+			expect.objectContaining({ code: 'invalid' }),
+		)
+	})
+
+	it('owes a leased loss one refill after idle losses spend the bound', async () => {
+		const fixture = createFloorFixture({ min: 2 })
+		try {
+			await fixture.pool.start()
+			const leased = await fixture.pool.acquire()
+			fixture.resources[1]?.loss.resolve()
+			await waitForDelay()
+			expect(fixture.attempts).toBe(3)
+			fixture.resources[2]?.loss.resolve()
+			await waitForDelay()
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create' })
+			expect([fixture.pool.size, fixture.attempts]).toEqual([1, 3])
+			await leased.destroy()
+			const replacement = await fixture.pool.acquire()
+			expect(replacement.value).not.toBe(leased.value)
+			expect(fixture.attempts).toBe(4)
+			replacement.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('counts an owed refill failure and refuses another attempt', async () => {
+		let fails = false
+		const cause = new Error('owed failure')
+		const fixture = createFloorFixture({
+			min: 2,
+			create: () => {
+				if (fails) throw cause
+				return { loss: Promise.withResolvers<void>() }
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const leased = await fixture.pool.acquire()
+			fixture.resources[1]?.loss.resolve()
+			await waitForDelay()
+			fixture.resources[2]?.loss.resolve()
+			await waitForDelay()
+			fails = true
+			await leased.destroy()
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create', cause })
+			expect([fixture.attempts, fixture.pool.size]).toEqual([4, 0])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('preserves the owed attempt when a leased loss arrives during a failing refill', async () => {
+		const refill = Promise.withResolvers<never>()
+		let calls = 0
+		const fixture = createFloorFixture({
+			min: 2,
+			create: () => {
+				calls += 1
+				if (calls === 3) return refill.promise
+				return { loss: Promise.withResolvers<void>() }
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const leased = await fixture.pool.acquire()
+			fixture.resources[1]?.loss.resolve()
+			await waitForDelay()
+			expect(calls).toBe(3)
+			await leased.destroy()
+			refill.reject(new Error('in-flight refill'))
+			await waitForDelay()
+			expect([calls, fixture.pool.size, fixture.pool.idle]).toEqual([4, 1, 1])
+		} finally {
+			refill.reject(new Error('test cleanup'))
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('preserves the owed attempt when the refill fails before the leased loss', async () => {
+		let calls = 0
+		const fixture = createFloorFixture({
+			min: 2,
+			create: () => {
+				calls += 1
+				if (calls === 3) throw new Error('refill')
+				return { loss: Promise.withResolvers<void>() }
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const leased = await fixture.pool.acquire()
+			fixture.resources[1]?.loss.resolve()
+			await waitForDelay()
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create' })
+			await leased.destroy()
+			await waitForDelay()
+			expect([calls, fixture.pool.size, fixture.pool.idle]).toEqual([4, 1, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('resets strikes at a lease grant and never strikes a previously leased record', async () => {
+		let calls = 0
+		const fixture = createFloorFixture({
+			create: () => {
+				calls += 1
+				if (calls === 1 || calls === 3) throw new Error('refill')
+				return { loss: Promise.withResolvers<void>() }
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const token = await fixture.pool.acquire()
+			token.release()
+			token.value.loss.resolve()
+			await waitForDelay()
+			expect([calls, fixture.pool.idle]).toEqual([4, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('never grants a record lost during validation', async () => {
+		const validation = Promise.withResolvers<boolean>()
+		const entered = Promise.withResolvers<void>()
+		let checks = 0
+		const fixture = createFloorFixture({
+			validate: () => {
+				checks += 1
+				if (checks > 1) return true
+				entered.resolve()
+				return validation.promise
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const acquiring = fixture.pool.acquire()
+			await entered.promise
+			const lost = fixture.resources[0]
+			lost?.loss.resolve()
+			await waitForDelay()
+			validation.resolve(true)
+			const token = await acquiring
+			expect(token.value).not.toBe(lost)
+			expect([fixture.pool.active, fixture.attempts]).toEqual([1, 2])
+			token.release()
+		} finally {
+			validation.resolve(true)
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('never grants a lost ready record behind a slower FIFO head', async () => {
+		const validation = Promise.withResolvers<boolean>()
+		let checks = 0
+		const fixture = createFloorFixture({
+			min: 2,
+			validate: () => {
+				checks += 1
+				return checks === 1 ? validation.promise : true
+			},
+		})
+		try {
+			await fixture.pool.start()
+			const first = fixture.pool.acquire()
+			const second = fixture.pool.acquire()
+			await waitForDelay()
+			expect(checks).toBe(2)
+			const lost = fixture.resources[1]
+			lost?.loss.resolve()
+			await waitForDelay()
+			validation.resolve(true)
+			const tokens = await Promise.all([first, second])
+			expect(tokens[1].value).not.toBe(lost)
+			expect([fixture.pool.active, fixture.pool.size]).toEqual([2, 2])
+			for (const token of tokens) token.release()
+		} finally {
+			validation.resolve(true)
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('keeps a watch cleanup failure once and refuses replacement beside the survivor', async () => {
+		const cause = new Error('watch cleanup')
+		const fixture = createFloorFixture({
+			destroy: () => {
+				throw cause
+			},
+		})
+		await fixture.pool.start()
+		fixture.resources[0]?.loss.resolve()
+		await waitForDelay()
+		expect([fixture.attempts, fixture.pool.size, fixture.pool.idle]).toEqual([1, 1, 0])
+		await expect(fixture.pool.destroy()).rejects.toMatchObject({
+			code: 'cleanup',
+			context: { failures: [cause] },
+		})
+		expect(fixture.destroyed).toHaveLength(1)
+	})
+
+	it('retains clear and invalid-validation cleanup failures and aborts their watches', async () => {
+		const cause = new Error('retained cleanup')
+		const cleared = createFloorFixture({
+			destroy: () => {
+				throw cause
+			},
+		})
+		await cleared.pool.start()
+		await expect(cleared.pool.clear()).rejects.toMatchObject({ code: 'cleanup', cause })
+		expect([cleared.attempts, cleared.pool.size]).toEqual([1, 1])
+		expect([...cleared.signals.values()].every((signal) => signal.aborted)).toBe(true)
+		await expect(cleared.pool.destroy()).rejects.toMatchObject({ code: 'cleanup', cause })
+		const invalid = createFloorFixture({
+			validate: () => false,
+			destroy: () => {
+				throw cause
+			},
+		})
+		await invalid.pool.start()
+		await expect(invalid.pool.acquire()).rejects.toMatchObject({ code: 'cleanup', cause })
+		expect([invalid.attempts, invalid.pool.size]).toEqual([1, 1])
+		expect([...invalid.signals.values()].every((signal) => signal.aborted)).toBe(true)
+		await expect(invalid.pool.destroy()).rejects.toMatchObject({ code: 'cleanup', cause })
+	})
+
+	it('handles a synchronous watch throw as loss and keeps the last cause', async () => {
+		const cause = new Error('synchronous watch')
+		const errors = createRecorder<readonly [unknown, string]>()
+		const fixture = createFloorFixture({
+			restarts: 0,
+			watch: () => {
+				throw cause
+			},
+			error: errors.handler,
+		})
+		try {
+			await expect(fixture.pool.start()).rejects.toMatchObject({ code: 'create', cause })
+			expect(errors.calls).toEqual([[cause, 'watch']])
+			expect([fixture.attempts, fixture.destroyed.length]).toEqual([1, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+})
 
 describe('Pool validation and errors', () => {
 	it('rejects a maximum that is not a positive safe integer and accepts omission as unbounded', () => {

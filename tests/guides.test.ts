@@ -37,7 +37,7 @@ await new GuideCommand({
 }).execute(async ({ files, report, rows }) => {
 	const { computeSymbolKey, findMissingSymbols } = await import('@orkestrel/guide')
 	const { requireValue } = await import('@orkestrel/test')
-	const { PoolError, isPoolError, isPoolMax, isPoolSignal } = await import('@src/core')
+	const { createPool, PoolError, isPoolError, isPoolMax, isPoolSignal } = await import('@src/core')
 	const { describe, expect, it } = await import('vitest')
 	const own = requireValue(
 		rows.find((row) => row.entry.spec === GUIDE_SPEC),
@@ -155,6 +155,21 @@ await new GuideCommand({
 	// These cases run the flagship fences and assert the values their comments claim.
 	describe('flagship fences', () => {
 		const guideText = requireValue(files[GUIDE_SPEC], `Missing file: ${GUIDE_SPEC}`)
+
+		it('warms and destroys the floor example through its public contract', async () => {
+			const pool = createPool({ create: () => new Uint8Array(64), min: 1, restarts: 1 })
+			try {
+				await pool.start()
+				expect(pool.idle).toBe(1)
+				const token = await pool.acquire()
+				expect(token.value.byteLength).toBe(64)
+				await token.destroy()
+				expect(pool.active).toBe(0)
+			} finally {
+				await pool.destroy()
+			}
+			expect(pool.size).toBe(0)
+		})
 
 		it('answers from the public boundary guards the patterns fence documents', () => {
 			expect(isPoolMax(4)).toBe(true)

@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { POOL_EVENTS } from './setup.js'
+import { POOL_EVENTS, createFloorFixture } from './setup.js'
+
+describe('createFloorFixture', () => {
+	it('records real hook calls, resource identity, and disposal signals', async () => {
+		const fixture = createFloorFixture()
+		await fixture.pool.start()
+		const token = await fixture.pool.acquire()
+		expect(fixture.resources).toEqual([token.value])
+		expect(fixture.signals.get(token.value)?.aborted).toBe(false)
+		await fixture.pool.destroy()
+		expect(fixture.destroyed).toEqual([token.value])
+		expect(fixture.signals.get(token.value)?.aborted).toBe(true)
+		expect(fixture.attempts).toBe(1)
+	})
+})
 
 describe('POOL_EVENTS', () => {
 	it('is frozen so a consumer cannot mutate the shared table', () => {

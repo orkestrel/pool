@@ -1,14 +1,17 @@
 # @orkestrel/pool
 
-> A typed resource pool with optional bounded capacity, unique ownership, FIFO settlement,
-> validated reuse, caller-owned cancellation, explicit cleanup failures, and a stable
-> event-driven teardown barrier.
+> A typed resource pool with optional bounded capacity, a warm floor, bounded loss recovery,
+> unique ownership, FIFO settlement, validated reuse, caller-owned cancellation, and explicit cleanup.
 
 Create a pool with the `createPool` function, hand it the hooks that make, check, and tear
 down one resource, and `await pool.acquire()` wherever the work needs one. Release the token
 in a `finally` block, and `await pool.destroy()` when the process is done with the pool.
 Environment-agnostic — no I/O, no browser or server assumptions. Part of the `@orkestrel`
 line.
+
+For eager resources, set `min` and the required `restarts` bound, then call `start()`.
+The `watch(value, signal)` hook reports loss; a holder can also call its token's `destroy()`.
+The pool disposes lost records before replacing them and retains capacity when cleanup fails.
 
 ## Install
 

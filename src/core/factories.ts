@@ -10,12 +10,15 @@ import { Pool } from './Pool.js'
  * request order. `clear` owns its idle snapshot; `destroy` returns one stable barrier and
  * waits for every in-flight create, validation, and destroy attempt before destroying the
  * emitter last.
+ * Set `min` with its required `restarts` bound and call `start()` to warm resources and
+ * refill losses independently of queued acquires. `watch` observes loss and its signal
+ * aborts at disposal; a token can declare loss through `destroy()`.
  *
  * @typeParam T - The pooled resource type
- * @param options - Lifecycle hooks, optional positive safe `max`, and observation hooks
+ * @param options - Lifecycle hooks, capacity, optional bounded warm floor, and observation hooks
  * @returns A working {@link PoolInterface}
- * @throws {@link PoolError} Thrown when `options.max` is present and is not a positive safe
- * integer, with `code: 'invalid'`. Construction validates it synchronously, before the pool exists.
+ * @throws {@link PoolError} Thrown with `code: 'invalid'` when capacity, restart bounds, or
+ * the watch hook are invalid. Construction validates them synchronously, before the pool exists.
  *
  * @example Create a pool
  * ```ts
