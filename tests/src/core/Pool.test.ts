@@ -852,6 +852,89 @@ describe('Pool floor races', () => {
 		}
 	})
 
+	it('keeps a failing refill spent when holders destroy older healthy grants', async () => {
+		let calls = 0
+		const invalid = new WeakSet<object>()
+		const fixture = createFloorFixture({
+			min: 2,
+			restarts: 1,
+			create: () => {
+				calls += 1
+				const resource = { loss: Promise.withResolvers<void>() }
+				if (calls === 1 || calls === 3) invalid.add(resource)
+				return resource
+			},
+			validate: (resource) => !invalid.has(resource),
+		})
+		try {
+			await fixture.pool.start()
+			const first = await fixture.pool.acquire()
+			await waitForDelay()
+			expect(first.value).toBe(fixture.resources[1])
+			expect(fixture.attempts).toBe(3)
+			await first.destroy()
+			await waitForDelay()
+			expect(fixture.attempts).toBe(4)
+			const second = await fixture.pool.acquire()
+			await waitForDelay()
+			expect(second.value).toBe(fixture.resources[3])
+			expect([fixture.attempts, fixture.pool.size]).toEqual([4, 1])
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create' })
+			await second.destroy()
+			await waitForDelay()
+			expect([fixture.attempts, fixture.pool.size, fixture.pool.idle]).toEqual([5, 1, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('does not reopen failed creates when granting a record older than the last strike', async () => {
+		let calls = 0
+		const cause = new Error('failing refill')
+		const fixture = createFloorFixture({
+			min: 2,
+			restarts: 1,
+			create: () => {
+				calls += 1
+				if (calls > 1) throw cause
+				return { loss: Promise.withResolvers<void>() }
+			},
+		})
+		try {
+			await expect(fixture.pool.start()).rejects.toMatchObject({ code: 'create', cause })
+			const token = await fixture.pool.acquire()
+			await waitForDelay()
+			expect(fixture.attempts).toBe(3)
+			await token.destroy()
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create', cause })
+			expect([fixture.attempts, fixture.pool.size]).toEqual([4, 0])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('spends the floor when an idle never-leased record dies again after refill without a grant', async () => {
+		const fixture = createFloorFixture({ min: 2, restarts: 1 })
+		try {
+			await fixture.pool.start()
+			const survivor = await fixture.pool.acquire()
+			const idle = fixture.resources[1]
+			expect(idle).toBeDefined()
+			idle?.loss.resolve()
+			await waitForDelay()
+			expect(fixture.attempts).toBe(3)
+			const replacement = fixture.resources[2]
+			expect(replacement).toBeDefined()
+			replacement?.loss.resolve()
+			await waitForDelay()
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create' })
+			expect([fixture.attempts, fixture.pool.size, fixture.pool.idle]).toEqual([3, 1, 0])
+			survivor.release()
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
 	it('resets strikes at a lease grant and never strikes a previously leased record', async () => {
 		let calls = 0
 		const fixture = createFloorFixture({

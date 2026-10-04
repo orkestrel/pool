@@ -134,7 +134,10 @@ hook. After disposal, the token's `release()` and `destroy()` calls do nothing. 
 the first `destroy()` call waits for that cleanup attempt and rejects with `cleanup` if it fails.
 
 A failed refill adds a strike. Losing a record that has never been leased also adds a strike,
-including failed validation. Granting a lease resets the strikes; successful creation does not.
+including failed validation. Granting a lease resets the strikes only when the granted record
+was created after the last strike; successful creation alone does not. Granting an older healthy
+record leaves the strikes unchanged. An idle never-leased record that dies, refills, and dies
+again without a grant between those losses can spend the floor.
 When strikes exceed `restarts`, the floor is spent. With `restarts: 1`, the first failed
 create permits another attempt, and the second refuses the next attempt. `start()` rejects
 with `create` and the last cause; another `start()` resets the strikes. While the floor is
@@ -146,7 +149,8 @@ serve their live records. A loss without a thrown cause leaves that cause undefi
 A record lost while leased earns one refill attempt even after the bound is spent.
 The credit becomes spendable only when successful disposal removes the record; failed disposal
 grants no credit. That attempt remains owed during a concurrent refill and never resets the strikes.
-Its failed create adds a strike; its success alone does not reset the strikes. A record that was leased
+Its failed create adds a strike; its success alone does not reset the strikes. Granting that
+replacement resets the strikes only if no strike occurred after its creation. A record that was leased
 and later released adds no strike when lost. `token.destroy()` disposes the exact leased
 record, waits for an existing cleanup attempt, and rejects with `cleanup` if disposal fails.
 A token ends once: after `release()` or `destroy()`, the other call does nothing. Repeating

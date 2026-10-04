@@ -75,9 +75,11 @@ export interface PoolToken<T> {
  * `min` and `max` are positive safe integers and must be equal when both are set; `max`
  * defaults to `min`. Omitting both leaves capacity unbounded. `restarts` is required with
  * `min`, is refused without `min`, has no default, and is a non-negative safe integer.
- * A failed refill or loss of a never-leased record adds a strike; a lease grant resets the
- * strikes. Exceeding `restarts` stops refills until `start()`, except for one attempt owed
- * to each lost leased record.
+ * A failed refill or loss of a never-leased record adds a strike. A lease grant resets the
+ * strikes only when its record was created after the last strike; creation alone does not.
+ * Exceeding `restarts` stops ordinary refills until `start()` or a qualifying grant.
+ * Each lost leased record earns one refill attempt after successful disposal, even when
+ * the bound is spent. That credit does not reset strikes; a failed attempt adds a strike.
  * `watch` settles on loss and receives a signal aborted when disposal begins. Its rejection
  * reaches `error` with event `watch` only while the record is live. Any settlement after
  * the signal aborts is ignored. `on` installs initial emitter listeners; `error`

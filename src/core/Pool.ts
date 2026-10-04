@@ -37,6 +37,7 @@ export class Pool<T> implements PoolInterface<T> {
 	readonly #error: EmitterErrorHandler | undefined
 	readonly #watches = new Map<object, AbortController>()
 	readonly #used = new WeakSet<object>()
+	readonly #births = new WeakMap<object, object>()
 	readonly #settled = new WeakSet<object>()
 	readonly #survivors = new Map<object, unknown>()
 	readonly #owing = new Set<object>()
@@ -68,6 +69,7 @@ export class Pool<T> implements PoolInterface<T> {
 	#starting: PromiseWithResolvers<void> | undefined
 	#refilling = false
 	#strikes = 0
+	#epoch = {}
 	#owed = 0
 	#cause: unknown
 
@@ -434,8 +436,7 @@ export class Pool<T> implements PoolInterface<T> {
 		try {
 			value = await this.#create()
 		} catch (error: unknown) {
-			this.#strikes += 1
-			this.#cause = error
+			this.#addStrike(error)
 			return
 		}
 		const record = this.#insert(value)
@@ -444,6 +445,7 @@ export class Pool<T> implements PoolInterface<T> {
 
 	#insert(value: T): object {
 		const record = {}
+		this.#births.set(record, this.#epoch)
 		this.#resources.set(record, value)
 		if (this.#watch !== undefined) {
 			const controller = new AbortController()
@@ -486,9 +488,14 @@ export class Pool<T> implements PoolInterface<T> {
 
 	#strike(record: object, cause?: unknown): void {
 		if (this.#min !== undefined && !this.#used.has(record)) {
-			this.#strikes += 1
-			this.#cause = cause
+			this.#addStrike(cause)
 		}
+	}
+
+	#addStrike(cause: unknown): void {
+		this.#strikes += 1
+		this.#cause = cause
+		this.#epoch = {}
 	}
 
 	#startCreate(waiter: PromiseWithResolvers<PoolToken<T>>): void {
@@ -668,7 +675,7 @@ export class Pool<T> implements PoolInterface<T> {
 			}
 			this.#leased.add(result.record)
 			this.#used.add(result.record)
-			this.#strikes = 0
+			if (this.#births.get(result.record) === this.#epoch) this.#strikes = 0
 			waiter.resolve(result.token)
 			this.#emitter.emit('acquire')
 		}
