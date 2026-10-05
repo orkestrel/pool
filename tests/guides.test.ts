@@ -37,7 +37,8 @@ await new GuideCommand({
 }).execute(async ({ files, report, rows }) => {
 	const { computeSymbolKey, findMissingSymbols } = await import('@orkestrel/guide')
 	const { requireValue } = await import('@orkestrel/test')
-	const { createPool, PoolError, isPoolError, isPoolMax, isPoolSignal } = await import('@src/core')
+	const { createPool, PoolError, isPoolError, isPoolLimit, isPoolSignal } =
+		await import('@src/core')
 	const { describe, expect, it } = await import('vitest')
 	const { getEventListeners } = await import('node:events')
 	const own = requireValue(
@@ -202,8 +203,8 @@ await pool.destroy()`)
 		})
 
 		it('answers from the public boundary guards the patterns fence documents', () => {
-			expect(isPoolMax(4)).toBe(true)
-			expect(isPoolMax(Number.POSITIVE_INFINITY)).toBe(false)
+			expect(isPoolLimit(4)).toBe(true)
+			expect(isPoolLimit(Number.POSITIVE_INFINITY)).toBe(false)
 			expect(isPoolSignal(new AbortController().signal)).toBe(true)
 
 			const failure = new PoolError({ code: 'destroyed' })
@@ -215,8 +216,8 @@ await pool.destroy()`)
 		it('carries the boundary fence lines the transcription copies', () => {
 			// The presence guard beside the transcription proves the transcribed lines are still
 			// the documented ones. Every line carrying a claim is bound here.
-			expect(guideText).toContain('isPoolMax(4) // true')
-			expect(guideText).toContain('isPoolMax(Infinity) // false: omit max for unbounded capacity')
+			expect(guideText).toContain('isPoolLimit(4) // true')
+			expect(guideText).toContain('isPoolLimit(Infinity) // false: omit max for unbounded capacity')
 			expect(guideText).toContain('isPoolSignal(new AbortController().signal) // true')
 			expect(guideText).toContain("const failure = new PoolError({ code: 'destroyed' })")
 			expect(guideText).toContain('if (isPoolError(failure)) console.error(failure.code)')

@@ -3,7 +3,7 @@ import type { PoolCode, PoolEventMap, PoolInterface, PoolOptions, PoolToken } fr
 import { Emitter } from '@orkestrel/emitter'
 import { attempt, isFunction, isNumber } from '@orkestrel/contract'
 import { PoolError } from './errors.js'
-import { isPoolMax, isPoolSignal } from './validators.js'
+import { isPoolLimit, isPoolSignal } from './validators.js'
 
 /**
  * Represents a resource pool with optional bounded capacity and a warm floor, whose opaque
@@ -87,13 +87,13 @@ export class Pool<T> implements PoolInterface<T> {
 		const min = options.min
 		const restarts = options.restarts
 		const watch = options.watch
-		if (max !== undefined && !isPoolMax(max)) {
+		if (max !== undefined && !isPoolLimit(max)) {
 			throw new PoolError({ code: 'invalid', context: { value: max } })
 		}
-		if (capacity !== undefined && !isPoolMax(capacity)) {
+		if (capacity !== undefined && !isPoolLimit(capacity)) {
 			throw new PoolError({ code: 'invalid', context: { value: capacity } })
 		}
-		if (min !== undefined && (!isPoolMax(min) || (max !== undefined && min !== max))) {
+		if (min !== undefined && (!isPoolLimit(min) || (max !== undefined && min !== max))) {
 			throw new PoolError({ code: 'invalid', context: { value: min } })
 		}
 		if (
@@ -426,7 +426,7 @@ export class Pool<T> implements PoolInterface<T> {
 				least = count
 			}
 		}
-		return selected
+		return this.#available[0] ?? selected
 	}
 
 	#spent(): boolean {

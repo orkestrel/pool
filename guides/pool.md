@@ -1,7 +1,7 @@
 # Pool
 
 > A typed resource pool with optional bounded capacity, a warm floor, bounded loss recovery,
-> unique ownership, FIFO settlement, validated reuse, caller-owned cancellation, and explicit cleanup.
+> exclusive leases by default, FIFO settlement, validated idle reuse, caller-owned cancellation, and explicit cleanup.
 
 The pool supports lazy creation or a warm floor, with no eviction timer, acquire timeout,
 or polling loop. Waits park on promises or signal listeners. An acquire rejects with
@@ -39,9 +39,9 @@ try {
 
 ### Factories
 
-| API          | Kind     | Summary                                                                                                                                  |
-| ------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `createPool` | function | Creates a distinct `PoolInterface` from resource lifecycle hooks, with optional bounded capacity, unique ownership, and FIFO settlement. |
+| API          | Kind     | Summary                                                                                                                                             |
+| ------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createPool` | function | Creates a distinct `PoolInterface` from resource lifecycle hooks, with optional bounded capacity, exclusive leases by default, and FIFO settlement. |
 
 ### Classes
 
@@ -57,7 +57,7 @@ In a guard table a `Shape` cell holds the type the guard narrows to.
 | API            | Kind     | Shape         | Summary                                                                                                          |
 | -------------- | -------- | ------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `isPoolError`  | function | `PoolError`   | Tests whether an unknown value is a `PoolError`, returning `false` for hostile proxies.                          |
-| `isPoolMax`    | function | `number`      | Tests whether a value is a positive safe integer, the only valid explicit pool maximum.                          |
+| `isPoolLimit`  | function | `number`      | Tests whether a value is a positive safe integer for a pool record or lease limit.                               |
 | `isPoolSignal` | function | `AbortSignal` | Tests whether a value is a native `AbortSignal` for the acquire boundary, returning `false` for hostile proxies. |
 
 ### Types
@@ -139,7 +139,7 @@ A failed refill adds a strike. Losing a record with no live lease also adds a st
 including a previously used record and failed idle validation. Granting a lease resets the
 strikes only when the granted record was created after the last strike; successful creation
 alone does not. Granting an older healthy
-record leaves the strikes unchanged. An idle never-leased record that dies, refills, and dies
+record leaves the strikes unchanged. Any idle record that dies, refills, and dies
 again without a grant between those losses can spend the floor.
 When strikes exceed `restarts`, the floor is spent. With `restarts: 1`, the first failed
 create permits another attempt, and the second refuses the next attempt. `start()` rejects
@@ -199,8 +199,9 @@ await pool.destroy()
 
 `capacity` is a positive safe integer limiting simultaneous leases on each record; it defaults
 to 1. `min` and `max` still bound records. Acquisition chooses the eligible record with the
-fewest live leases and reserved handouts, breaking ties by record creation order. A validating
-record is unavailable until validation settles. Reservations count before any awaited hook.
+fewest live leases and reserved handouts. Idle ties follow release order; occupied ties follow
+record creation order. A validating record is unavailable until validation settles.
+Reservations count before any awaited hook.
 
 Every `acquire` receives its queue position before a create or validation hook starts. The
 reentrancy-safe pump may assign several hook operations concurrently, but a head commit
@@ -231,6 +232,9 @@ Validation runs only when reserving an idle record; handouts on an occupied reco
 No caller receives a lease while idle validation is pending. This keeps a failed validation
 from silently disposing a record used by co-holders. After the last lease ends, the next idle
 reuse validates again. A freshly created lazy record keeps its direct handout behavior.
+With `capacity` greater than 1, an occupied record is never revalidated. Only `watch` detects
+its loss: without `watch`, a dead record can keep receiving leases until it becomes idle;
+with `watch`, that exposure lasts until the watch settles.
 
 Invalid validation, whether `false` or a thrown value, claims and cleans the record before a
 replacement capacity slot becomes available. Cleanup failure rejects that acquire with
@@ -339,10 +343,10 @@ const pool = createPool({
 Check a candidate value or error against the public boundary guards before acting on it:
 
 ```ts
-import { PoolError, isPoolError, isPoolMax, isPoolSignal } from '@orkestrel/pool'
+import { PoolError, isPoolError, isPoolLimit, isPoolSignal } from '@orkestrel/pool'
 
-isPoolMax(4) // true
-isPoolMax(Infinity) // false: omit max for unbounded capacity
+isPoolLimit(4) // true
+isPoolLimit(Infinity) // false: omit max for unbounded capacity
 isPoolSignal(new AbortController().signal) // true
 
 const failure = new PoolError({ code: 'destroyed' })

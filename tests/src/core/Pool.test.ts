@@ -249,9 +249,21 @@ describe('Pool sharing', () => {
 	it('retains failed shared cleanup once without a refill credit', async () => {
 		const disposal = Promise.withResolvers<void>()
 		const failure = new Error('shared cleanup fails')
-		const fixture = createFloorFixture({ capacity: 2, destroy: () => disposal.promise })
+		const refill = new Error('floor refill fails')
+		let calls = 0
+		const fixture = createFloorFixture({
+			min: 2,
+			restarts: 0,
+			capacity: 2,
+			create: () => {
+				calls += 1
+				if (calls > 1) throw refill
+				return { loss: Promise.withResolvers<void>() }
+			},
+			destroy: () => disposal.promise,
+		})
 		try {
-			await fixture.pool.start()
+			await expect(fixture.pool.start()).rejects.toMatchObject({ code: 'create', cause: refill })
 			const first = await fixture.pool.acquire()
 			const second = await fixture.pool.acquire()
 			const endings = [first.destroy(), second.destroy()]
@@ -260,8 +272,8 @@ describe('Pool sharing', () => {
 			for (const ending of endings)
 				await expect(ending).rejects.toMatchObject({ code: 'cleanup', cause: failure })
 			await expect(fixture.pool.acquire()).rejects.toMatchObject({
-				code: 'cleanup',
-				cause: failure,
+				code: 'create',
+				cause: refill,
 			})
 			expect([
 				fixture.attempts,
@@ -269,7 +281,7 @@ describe('Pool sharing', () => {
 				fixture.pool.size,
 				fixture.pool.active,
 				fixture.pool.idle,
-			]).toEqual([1, 1, 1, 0, 0])
+			]).toEqual([2, 1, 1, 0, 0])
 			await second.destroy()
 		} finally {
 			disposal.resolve()
@@ -277,6 +289,21 @@ describe('Pool sharing', () => {
 				code: 'cleanup',
 				context: { failures: [failure] },
 			})
+		}
+	})
+
+	it('reuses idle records in release order with capacity omitted', async () => {
+		const pool = new Pool({ max: 2, create: () => ({}) })
+		try {
+			const first = await pool.acquire()
+			const second = await pool.acquire()
+			expect(second.value).not.toBe(first.value)
+			second.release()
+			first.release()
+			const next = await pool.acquire()
+			expect(next.value).toBe(second.value)
+		} finally {
+			await pool.destroy()
 		}
 	})
 })

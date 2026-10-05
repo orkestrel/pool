@@ -1,18 +1,18 @@
 import { holds, isFunction, isNumber } from '@orkestrel/contract'
 
 /**
- * Tests whether a value is a positive safe integer, the only valid explicit pool maximum.
+ * Tests whether a value is a positive safe integer for a pool record or lease limit.
  *
- * @param value - The unknown maximum candidate
+ * @param value - The unknown record or lease limit candidate
  * @returns True if the value is a positive safe integer; false otherwise
  *
  * @example
  * ```ts
- * isPoolMax(8) // true
- * isPoolMax(Infinity) // false
+ * isPoolLimit(8) // true
+ * isPoolLimit(Infinity) // false
  * ```
  */
-export function isPoolMax(value: unknown): value is number {
+export function isPoolLimit(value: unknown): value is number {
 	return isNumber(value) && Number.isSafeInteger(value) && value > 0
 }
 

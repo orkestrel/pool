@@ -3,7 +3,7 @@ import { Pool } from './Pool.js'
 
 /**
  * Creates a distinct {@link PoolInterface} from resource lifecycle hooks, with optional bounded
- * capacity, unique ownership, and FIFO settlement.
+ * capacity, exclusive leases by default, and FIFO settlement.
  *
  * @remarks
  * Concurrent create and validation hooks may overlap, while acquire promises settle in

@@ -73,9 +73,13 @@ export interface PoolToken<T> {
  * `create` produces resources on demand, or only to restore `min` after `start()`.
  * `destroy` tears down a claimed resource. `validate` checks only idle records before reuse;
  * additional leases on occupied records skip validation, so validation cannot dispose co-holders.
+ * With `capacity` greater than 1, an occupied record is never revalidated. Only `watch` detects
+ * its loss: without `watch`, a dead record can keep receiving leases until it becomes idle;
+ * with `watch`, that exposure lasts until the watch settles.
  * `capacity` bounds simultaneous leases per record, including pending handouts, and is a positive
- * safe integer. Default: 1. Selection prefers the least occupied eligible record, with ties in
- * record creation order. Reservations precede awaited hooks; waiter settlement stays FIFO.
+ * safe integer. Default: 1. Selection prefers the least occupied eligible record, with idle ties
+ * in release order and occupied ties in creation order. Reservations precede awaited hooks;
+ * waiter settlement stays FIFO.
  * `min` and `max` are positive safe integers and must be equal when both are set; `max`
  * defaults to `min`. Omitting both leaves the record count unbounded. `restarts` is required with
  * `min`, is refused without `min`, has no default, and is a non-negative safe integer.

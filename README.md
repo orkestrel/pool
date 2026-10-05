@@ -1,7 +1,7 @@
 # @orkestrel/pool
 
 > A typed resource pool with optional bounded capacity, a warm floor, bounded loss recovery,
-> unique ownership, FIFO settlement, validated reuse, caller-owned cancellation, and explicit cleanup.
+> exclusive leases by default, FIFO settlement, validated idle reuse, caller-owned cancellation, and explicit cleanup.
 
 Create a pool with the `createPool` function, hand it the hooks that make, check, and tear
 down one resource, and `await pool.acquire()` wherever the work needs one. Release the token
@@ -10,7 +10,7 @@ Environment-agnostic — no I/O, no browser or server assumptions. Part of the `
 line.
 
 For eager resources, set `min` and the required `restarts` bound on failed refills and losses
-of never-leased records between strike resets, then call `start()`.
+of idle records between strike resets, then call `start()`.
 The `watch(value, signal)` hook reports loss; a holder can also call its token's `destroy()`.
 The pool disposes lost records before replacing them and keeps a record whose cleanup fails
 counted against `max`.
