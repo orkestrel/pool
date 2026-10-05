@@ -10,6 +10,277 @@ import { EventEmitter, getEventListeners, once } from 'node:events'
 import { createRecorder, createRecorders, waitForDelay } from '@orkestrel/test'
 import { POOL_EVENTS, createFloorFixture } from '../../setup.js'
 
+describe('Pool sharing', () => {
+	it('rejects invalid per-record capacity and snapshots it once', async () => {
+		for (const capacity of [0, -0, -1, 1.5, Number.NaN, Infinity, 2 ** 53]) {
+			expect(() => new Pool({ create: () => 0, capacity })).toThrow(
+				expect.objectContaining({ code: 'invalid' }),
+			)
+		}
+		let reads = 0
+		const pool = new Pool({
+			create: () => 0,
+			max: 1,
+			get capacity() {
+				reads += 1
+				return reads === 1 ? 2 : 0
+			},
+		})
+		try {
+			await pool.acquire()
+			expect(reads).toBe(1)
+		} finally {
+			await pool.destroy()
+		}
+	})
+
+	it('bounds shared capacity and selects least occupancy with stable ties', async () => {
+		const fixture = createFloorFixture({ min: 2, capacity: 2 })
+		const granted = createRecorder<[unknown]>()
+		try {
+			await fixture.pool.start()
+			const pending = Array.from({ length: 5 }, () => fixture.pool.acquire())
+			for (const promise of pending) void promise.then(granted.handler, () => {})
+			await waitForDelay()
+			expect(granted.count).toBe(4)
+			const tokens = await Promise.all(pending.slice(0, 4))
+			expect(tokens.map((token) => token.value)).toEqual([
+				fixture.resources[0],
+				fixture.resources[1],
+				fixture.resources[0],
+				fixture.resources[1],
+			])
+			expect([fixture.pool.size, fixture.pool.active, fixture.pool.idle]).toEqual([2, 2, 0])
+			tokens[1]?.release()
+			const next = await pending[4]
+			expect(next?.value).toBe(fixture.resources[1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('releases only the exact shared lease and ignores double and stale release', async () => {
+		const fixture = createFloorFixture({ capacity: 2 })
+		try {
+			await fixture.pool.start()
+			const first = await fixture.pool.acquire()
+			const second = await fixture.pool.acquire()
+			first.release()
+			expect([fixture.pool.active, fixture.pool.idle]).toEqual([1, 0])
+			const third = await fixture.pool.acquire()
+			first.release()
+			await first.destroy()
+			expect([fixture.destroyed.length, fixture.pool.active, fixture.pool.idle]).toEqual([0, 1, 0])
+			second.release()
+			expect([fixture.pool.active, fixture.pool.idle]).toEqual([1, 0])
+			third.release()
+			expect([fixture.pool.active, fixture.pool.idle]).toEqual([0, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('reserves ready shared handouts before FIFO settlement and recycles cancellation', async () => {
+		const validation = Promise.withResolvers<boolean>()
+		// The older record holds the FIFO head in validation.
+		let created = 0
+		const pool = new Pool({
+			min: 2,
+			restarts: 1,
+			capacity: 2,
+			create: () => ++created,
+			validate: (value) => (value === 1 ? validation.promise : true),
+		})
+		const controller = new AbortController()
+		const reason = new Error('cancel shared reservation')
+		const granted = createRecorder<[number]>()
+		try {
+			await pool.start()
+			const head = pool.acquire()
+			const cancelled = pool.acquire(controller.signal)
+			const tail = pool.acquire()
+			void head.then(
+				(token) => granted.handler(token.value),
+				() => {},
+			)
+			void tail.then(
+				(token) => granted.handler(token.value),
+				() => {},
+			)
+			void cancelled.catch(() => {})
+			await waitForDelay()
+			expect(granted.count).toBe(0)
+			controller.abort(reason)
+			await expect(cancelled).rejects.toBe(reason)
+			const last = pool.acquire()
+			void last.catch(() => {})
+			validation.resolve(true)
+			const tokens = await Promise.all([head, tail, last])
+			expect(tokens.map((token) => token.value)).toEqual([1, 2, 2])
+			expect(granted.calls).toEqual([[1], [2]])
+			expect([pool.size, pool.active, pool.idle]).toEqual([2, 2, 0])
+		} finally {
+			validation.resolve(true)
+			await pool.destroy()
+		}
+	})
+
+	it('disposes a shared loss once and grants only one owed refill on a spent floor', async () => {
+		let calls = 0
+		const failure = new Error('refill fails')
+		const fixture = createFloorFixture({
+			min: 2,
+			restarts: 0,
+			capacity: 2,
+			create: () => {
+				calls += 1
+				if (calls > 1) throw failure
+				return { loss: Promise.withResolvers<void>() }
+			},
+		})
+		try {
+			await expect(fixture.pool.start()).rejects.toMatchObject({ code: 'create' })
+			const first = await fixture.pool.acquire()
+			const second = await fixture.pool.acquire()
+			first.value.loss.resolve()
+			await waitForDelay()
+			first.release()
+			second.release()
+			await Promise.all([first.destroy(), second.destroy()])
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create', cause: failure })
+			expect([fixture.destroyed.length, calls, fixture.pool.size, fixture.pool.active]).toEqual([
+				1, 3, 0, 0,
+			])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('destroys every co-holder through one lease and shares its pending cleanup', async () => {
+		const disposal = Promise.withResolvers<void>()
+		const fixture = createFloorFixture({ capacity: 2, destroy: () => disposal.promise })
+		try {
+			await fixture.pool.start()
+			const first = await fixture.pool.acquire()
+			const second = await fixture.pool.acquire()
+			const ending = first.destroy()
+			const other = second.destroy()
+			expect([fixture.destroyed.length, fixture.pool.active, fixture.pool.idle]).toEqual([1, 0, 0])
+			expect(fixture.attempts).toBe(1)
+			disposal.resolve()
+			await Promise.all([ending, other])
+			await waitForDelay()
+			const replacement = await fixture.pool.acquire()
+			first.release()
+			second.release()
+			await second.destroy()
+			expect([fixture.attempts, fixture.destroyed.length, fixture.pool.active]).toEqual([2, 1, 1])
+			replacement.release()
+		} finally {
+			disposal.resolve()
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('skips validation while sharing and validates again only after the last release', async () => {
+		let validations = 0
+		const fixture = createFloorFixture({
+			capacity: 2,
+			validate: () => ++validations !== 2,
+		})
+		try {
+			await fixture.pool.start()
+			const first = await fixture.pool.acquire()
+			const second = await fixture.pool.acquire()
+			expect([validations, fixture.destroyed.length]).toEqual([1, 0])
+			first.release()
+			const third = await fixture.pool.acquire()
+			expect([validations, fixture.destroyed.length]).toEqual([1, 0])
+			second.release()
+			third.release()
+			const next = await fixture.pool.acquire()
+			expect(next.value).not.toBe(first.value)
+			expect([validations, fixture.destroyed.length]).toEqual([3, 1])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('strikes idle loss after use and leaves refilled records holderless without reopening the budget', async () => {
+		const fixture = createFloorFixture({ capacity: 2, restarts: 1 })
+		try {
+			await fixture.pool.start()
+			const first = await fixture.pool.acquire()
+			const second = await fixture.pool.acquire()
+			first.release()
+			second.release()
+			first.value.loss.resolve()
+			await waitForDelay()
+			expect([fixture.attempts, fixture.pool.active, fixture.pool.idle]).toEqual([2, 0, 1])
+			const replacement = fixture.resources[1]
+			expect(replacement).toBeDefined()
+			replacement?.loss.resolve()
+			await waitForDelay()
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create' })
+			expect([fixture.attempts, fixture.pool.size]).toEqual([2, 0])
+		} finally {
+			await fixture.pool.destroy()
+		}
+	})
+
+	it('keeps default leases exclusive until release', async () => {
+		const pool = new Pool({ max: 1, create: () => 0 })
+		const granted = createRecorder<[]>()
+		try {
+			const first = await pool.acquire()
+			const next = pool.acquire()
+			void next.then(granted.handler, () => {})
+			await waitForDelay()
+			expect(granted.count).toBe(0)
+			first.release()
+			const second = await next
+			expect(second.value).toBe(first.value)
+			expect(granted.count).toBe(1)
+		} finally {
+			await pool.destroy()
+		}
+	})
+
+	it('retains failed shared cleanup once without a refill credit', async () => {
+		const disposal = Promise.withResolvers<void>()
+		const failure = new Error('shared cleanup fails')
+		const fixture = createFloorFixture({ capacity: 2, destroy: () => disposal.promise })
+		try {
+			await fixture.pool.start()
+			const first = await fixture.pool.acquire()
+			const second = await fixture.pool.acquire()
+			const endings = [first.destroy(), second.destroy()]
+			for (const ending of endings) void ending.catch(() => {})
+			disposal.reject(failure)
+			for (const ending of endings)
+				await expect(ending).rejects.toMatchObject({ code: 'cleanup', cause: failure })
+			await expect(fixture.pool.acquire()).rejects.toMatchObject({
+				code: 'cleanup',
+				cause: failure,
+			})
+			expect([
+				fixture.attempts,
+				fixture.destroyed.length,
+				fixture.pool.size,
+				fixture.pool.active,
+				fixture.pool.idle,
+			]).toEqual([1, 1, 1, 0, 0])
+			await second.destroy()
+		} finally {
+			disposal.resolve()
+			await expect(fixture.pool.destroy()).rejects.toMatchObject({
+				code: 'cleanup',
+				context: { failures: [failure] },
+			})
+		}
+	})
+})
+
 describe('Pool floor', () => {
 	it('validates min, matching max, and the required restart bound', () => {
 		for (const min of [0, -0, -1, 1.5, Number.NaN, Infinity, 2 ** 53]) {
@@ -935,7 +1206,7 @@ describe('Pool floor races', () => {
 		}
 	})
 
-	it('resets strikes at a lease grant and never strikes a previously leased record', async () => {
+	it('resets strikes at a lease grant and strikes a previously leased idle record', async () => {
 		let calls = 0
 		const fixture = createFloorFixture({
 			create: () => {
@@ -950,7 +1221,7 @@ describe('Pool floor races', () => {
 			token.release()
 			token.value.loss.resolve()
 			await waitForDelay()
-			expect([calls, fixture.pool.idle]).toEqual([4, 1])
+			expect([calls, fixture.pool.idle]).toEqual([3, 0])
 		} finally {
 			await fixture.pool.destroy()
 		}

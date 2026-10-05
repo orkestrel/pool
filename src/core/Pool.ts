@@ -31,12 +31,12 @@ export class Pool<T> implements PoolInterface<T> {
 	readonly #destroy: ((value: T) => Promise<void> | void) | undefined
 	readonly #validate: ((value: T) => Promise<boolean> | boolean) | undefined
 	readonly #max: number | undefined
+	readonly #capacity: number
 	readonly #min: number | undefined
 	readonly #restarts: number | undefined
 	readonly #watch: PoolOptions<T>['watch']
 	readonly #error: EmitterErrorHandler | undefined
 	readonly #watches = new Map<object, AbortController>()
-	readonly #used = new WeakSet<object>()
 	readonly #births = new WeakMap<object, object>()
 	readonly #settled = new WeakSet<object>()
 	readonly #survivors = new Map<object, unknown>()
@@ -45,7 +45,7 @@ export class Pool<T> implements PoolInterface<T> {
 	readonly #resources = new Map<object, T>()
 	readonly #available: object[] = []
 	readonly #validating = new Set<object>()
-	readonly #leased = new Set<object>()
+	readonly #leased = new Map<object, Set<object>>()
 	readonly #destroying = new Map<object, Promise<void>>()
 	readonly #waiters: Array<PromiseWithResolvers<PoolToken<T>>> = []
 	readonly #assigned = new Set<PromiseWithResolvers<PoolToken<T>>>()
@@ -77,17 +77,21 @@ export class Pool<T> implements PoolInterface<T> {
 	 * Constructs a pool and synchronously validates its capacity contract.
 	 *
 	 * @param options - Resource hooks, observation hooks, capacity, and optional bounded warm floor
-	 * @throws {@link PoolError} Thrown with `code: 'invalid'` when `min` or `max` is not a positive
-	 * safe integer, their explicit values differ, `restarts` is absent with `min`, present without
+	 * @throws {@link PoolError} Thrown with `code: 'invalid'` when `capacity`, `min`, or `max` is not a positive
+	 * safe integer, explicit `min` and `max` differ, `restarts` is absent with `min`, present without
 	 * `min`, or not a non-negative safe integer, or `watch` is not callable.
 	 */
 	constructor(options: PoolOptions<T>) {
 		const max = options.max
+		const capacity = options.capacity
 		const min = options.min
 		const restarts = options.restarts
 		const watch = options.watch
 		if (max !== undefined && !isPoolMax(max)) {
 			throw new PoolError({ code: 'invalid', context: { value: max } })
+		}
+		if (capacity !== undefined && !isPoolMax(capacity)) {
+			throw new PoolError({ code: 'invalid', context: { value: capacity } })
 		}
 		if (min !== undefined && (!isPoolMax(min) || (max !== undefined && min !== max))) {
 			throw new PoolError({ code: 'invalid', context: { value: min } })
@@ -111,6 +115,7 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#destroy = options.destroy
 		this.#validate = options.validate
 		this.#max = max ?? min
+		this.#capacity = capacity ?? 1
 		this.#min = min
 		this.#restarts = restarts
 		this.#watch = watch
@@ -131,12 +136,12 @@ export class Pool<T> implements PoolInterface<T> {
 		return this.#resources.size
 	}
 
-	/** Counts the records immediately available without validation work. */
+	/** Counts available records with no live lease or pending handout. */
 	get idle(): number {
 		return this.#available.length
 	}
 
-	/** Counts the records represented by unsettled released-once lease tokens. */
+	/** Counts records with live leases, counting a shared record once rather than counting its leases. */
 	get active(): number {
 		return this.#leased.size
 	}
@@ -162,8 +167,8 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	/**
-	 * Queues the caller in FIFO order, validates an idle record or waits for a floor refill, and
-	 * creates on demand only without a floor.
+	 * Queues the caller in FIFO order, shares an occupied record or validates an idle record, and
+	 * waits for a floor refill or creates on demand without a floor.
 	 *
 	 * @param signal - Optional native cancellation signal
 	 * @returns A promise for the unique resource lease
@@ -171,9 +176,9 @@ export class Pool<T> implements PoolInterface<T> {
 	 * with `code: 'invalid'`. This throw is synchronous rather than a rejected promise, so a caller
 	 * that handles failures with `.catch()` alone misses it.
 	 * @throws {@link PoolError} Thrown as a rejection when `destroy()` has already begun, with
-	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an idle record,
+	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an eligible record,
 	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or
-	 * a floor retains a record, owns `min` records, has nothing idle, and has no refill or disposal
+	 * a floor retains a record, owns `min` records, has nothing eligible, and has no refill or disposal
 	 * pending, even with live leases, with `code: 'cleanup'` and the retained cleanup failure as cause.
 	 * A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
 	 */
@@ -281,8 +286,7 @@ export class Pool<T> implements PoolInterface<T> {
 		}
 	}
 
-	#token(record: object, value: T): PoolToken<T> {
-		const lease = {}
+	#token(record: object, value: T, lease: object): PoolToken<T> {
 		return {
 			value,
 			release: this.#createRelease(record, lease),
@@ -294,7 +298,7 @@ export class Pool<T> implements PoolInterface<T> {
 		return (): void => {
 			if (this.#settled.has(lease)) return
 			this.#settled.add(lease)
-			this.#release(record)
+			this.#release(record, lease)
 		}
 	}
 
@@ -343,10 +347,12 @@ export class Pool<T> implements PoolInterface<T> {
 			this.#repump = false
 			for (const waiter of this.#waiters) {
 				if (this.#assigned.has(waiter) || this.#ready.has(waiter)) continue
-				const record = this.#available.shift()
+				const record = this.#select()
 				if (record !== undefined) {
 					this.#assigned.add(waiter)
-					this.#validating.add(record)
+					const index = this.#available.indexOf(record)
+					if (index >= 0) this.#available.splice(index, 1)
+					if (this.#occupancy(record) === 0) this.#validating.add(record)
 					this.#startValidation(waiter, record)
 					continue
 				}
@@ -393,6 +399,34 @@ export class Pool<T> implements PoolInterface<T> {
 		} while (this.#repump)
 		this.#pumping = false
 		this.#fill()
+	}
+
+	#occupancy(record: object): number {
+		let count = this.#leased.get(record)?.size ?? 0
+		for (const result of this.#ready.values()) {
+			if (result.success && result.record === record) count += 1
+		}
+		return count
+	}
+
+	#select(): object | undefined {
+		let selected: object | undefined
+		let least = this.#capacity
+		for (const record of this.#resources.keys()) {
+			if (
+				this.#validating.has(record) ||
+				this.#destroying.has(record) ||
+				this.#survivors.has(record)
+			)
+				continue
+			const count = this.#occupancy(record)
+			if (count === 0 && !this.#available.includes(record)) continue
+			if (count < least) {
+				selected = record
+				least = count
+			}
+		}
+		return selected
 	}
 
 	#spent(): boolean {
@@ -487,7 +521,7 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	#strike(record: object, cause?: unknown): void {
-		if (this.#min !== undefined && !this.#used.has(record)) {
+		if (this.#min !== undefined && !this.#leased.has(record)) {
 			this.#addStrike(cause)
 		}
 	}
@@ -510,7 +544,7 @@ export class Pool<T> implements PoolInterface<T> {
 	#startValidation(waiter: PromiseWithResolvers<PoolToken<T>>, record: object): void {
 		for (const [owned, value] of this.#resources) {
 			if (owned !== record) continue
-			if (this.#validate === undefined) {
+			if (!this.#validating.has(record) || this.#validate === undefined) {
 				this.#validating.delete(record)
 				this.#prepare(waiter, record, value)
 				return
@@ -563,7 +597,7 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#ready.set(waiter, {
 			success: true,
 			record,
-			token: this.#token(record, value),
+			token: this.#token(record, value, waiter),
 		})
 		this.#commit()
 	}
@@ -642,7 +676,7 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#ready.set(waiter, {
 			success: true,
 			record,
-			token: this.#token(record, value),
+			token: this.#token(record, value, waiter),
 		})
 		this.#commit()
 	}
@@ -673,8 +707,9 @@ export class Pool<T> implements PoolInterface<T> {
 				waiter.reject(result.error)
 				continue
 			}
-			this.#leased.add(result.record)
-			this.#used.add(result.record)
+			const leases = this.#leased.get(result.record) ?? new Set<object>()
+			leases.add(waiter)
+			this.#leased.set(result.record, leases)
 			if (this.#births.get(result.record) === this.#epoch) this.#strikes = 0
 			waiter.resolve(result.token)
 			this.#emitter.emit('acquire')
@@ -705,8 +740,10 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#finish()
 	}
 
-	#release(record: object): void {
-		if (!this.#leased.delete(record)) return
+	#release(record: object, lease: object): void {
+		const leases = this.#leased.get(record)
+		if (leases === undefined || !leases.delete(lease)) return
+		if (leases.size === 0) this.#leased.delete(record)
 		this.#recycle(record)
 	}
 
@@ -717,7 +754,13 @@ export class Pool<T> implements PoolInterface<T> {
 			this.#own(this.#dispose(record))
 			return
 		}
-		this.#available.push(record)
+		if (
+			this.#occupancy(record) === 0 &&
+			!this.#validating.has(record) &&
+			!this.#available.includes(record)
+		) {
+			this.#available.push(record)
+		}
 		this.#pump()
 		if (this.#available.includes(record)) this.#emitter.emit('release')
 	}

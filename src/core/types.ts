@@ -51,13 +51,13 @@ export interface PoolToken<T> {
 	/** Holds the leased value. Duplicate values still belong to independent records. */
 	readonly value: T
 	/**
-	 * Gives this exact record back to the pool once; a repeat call, and a call after loss or teardown
-	 * took ownership, are no-ops.
+	 * Ends this exact lease once; a repeat call, and a call after loss or teardown took ownership,
+	 * are no-ops. Other leases on the record remain live.
 	 */
 	release(): void
 	/**
-	 * Destroys this exact record instead of returning it; a repeat call, and a call after release,
-	 * are no-ops.
+	 * Destroys this exact record for every co-holder and invalidates their leases; a repeat call,
+	 * and a call after release, are no-ops.
 	 *
 	 * @returns A promise for this record's cleanup attempt, including an attempt already in progress
 	 * @throws {@link PoolError} Thrown as a rejection with `code: 'cleanup'` when disposal fails.
@@ -71,13 +71,19 @@ export interface PoolToken<T> {
  *
  * @remarks
  * `create` produces resources on demand, or only to restore `min` after `start()`.
- * `destroy` tears down a claimed resource. `validate` checks an owned resource before reuse.
+ * `destroy` tears down a claimed resource. `validate` checks only idle records before reuse;
+ * additional leases on occupied records skip validation, so validation cannot dispose co-holders.
+ * `capacity` bounds simultaneous leases per record, including pending handouts, and is a positive
+ * safe integer. Default: 1. Selection prefers the least occupied eligible record, with ties in
+ * record creation order. Reservations precede awaited hooks; waiter settlement stays FIFO.
  * `min` and `max` are positive safe integers and must be equal when both are set; `max`
- * defaults to `min`. Omitting both leaves capacity unbounded. `restarts` is required with
+ * defaults to `min`. Omitting both leaves the record count unbounded. `restarts` is required with
  * `min`, is refused without `min`, has no default, and is a non-negative safe integer.
- * A failed refill or loss of a never-leased record adds a strike. A lease grant resets the
- * strikes only when its record was created after the last strike; creation alone does not.
+ * A failed refill or loss of a record with no live lease adds a strike, even after prior use.
+ * A lease grant resets the strikes only when its record was created after the last strike;
+ * creation alone does not.
  * Exceeding `restarts` stops ordinary refills until `start()` or a qualifying grant.
+ * Loss or one lease's `destroy()` invalidates every lease on that record with one disposal.
  * Each lost leased record earns one refill attempt after successful disposal, even when
  * the bound is spent. That credit does not reset strikes; a failed attempt adds a strike.
  * `watch` settles on loss and receives a signal aborted when disposal begins. Its rejection
@@ -92,6 +98,7 @@ export interface PoolOptions<T> {
 	readonly destroy?: (value: T) => Promise<void> | void
 	readonly validate?: (value: T) => Promise<boolean> | boolean
 	readonly watch?: (value: T, signal: AbortSignal) => Promise<unknown>
+	readonly capacity?: number
 	readonly max?: number
 	readonly min?: number
 	readonly restarts?: number
@@ -106,9 +113,9 @@ export interface PoolInterface<T> {
 	readonly emitter: EmitterInterface<PoolEventMap>
 	/** Counts all owned records, including records validating, destroying, or retained after failed cleanup. */
 	readonly size: number
-	/** Counts the records immediately available without validation work. */
+	/** Counts available records with no live lease or pending handout. */
 	readonly idle: number
-	/** Counts the records represented by unsettled released-once lease tokens. */
+	/** Counts records with live leases, counting a shared record once rather than counting its leases. */
 	readonly active: number
 	/**
 	 * Fills the warm floor and resets the strikes of a spent floor; without a floor, resolves immediately.
@@ -120,8 +127,8 @@ export interface PoolInterface<T> {
 	 */
 	start(): Promise<void>
 	/**
-	 * Queues the caller in FIFO order, validates an idle record or waits for a floor refill, and
-	 * creates on demand only without a floor.
+	 * Queues the caller in FIFO order, shares an occupied record or validates an idle record, and
+	 * waits for a floor refill or creates on demand without a floor.
 	 *
 	 * @param signal - Optional native cancellation signal
 	 * @returns A promise for the unique resource lease
@@ -129,9 +136,9 @@ export interface PoolInterface<T> {
 	 * with `code: 'invalid'`. This throw is synchronous rather than a rejected promise, so a caller
 	 * that handles failures with `.catch()` alone misses it.
 	 * @throws {@link PoolError} Thrown as a rejection when `destroy()` has already begun, with
-	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an idle record,
+	 * `code: 'destroyed'`; when the create hook fails or the floor is spent without an eligible record,
 	 * with `code: 'create'` and the last cause; and when an invalid record's cleanup fails or
-	 * a floor retains a record, owns `min` records, has nothing idle, and has no refill or disposal
+	 * a floor retains a record, owns `min` records, has nothing eligible, and has no refill or disposal
 	 * pending, even with live leases, with `code: 'cleanup'` and the retained cleanup failure as cause.
 	 * A `signal` that aborts rejects with the caller's exact `signal.reason` instead.
 	 */
