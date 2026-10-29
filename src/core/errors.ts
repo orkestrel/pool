@@ -1,5 +1,13 @@
 import type { PoolErrorOptions } from './types.js'
-import { holds, INTRINSICS, isArray, isError, isObject, isString } from '@orkestrel/contract'
+import {
+	holds,
+	INTRINSICS,
+	isArray,
+	isError,
+	isFunction,
+	isObject,
+	isString,
+} from '@orkestrel/contract'
 
 /**
  * Represents a stable, machine-readable pool failure that retains the original thrown value as
@@ -71,7 +79,7 @@ export function isPoolError(value: unknown): value is PoolError {
 			return false
 		const context: unknown = INTRINSICS.reflect.read(value, 'context')
 		if (context === undefined) return true
-		if (!isObject(context)) return false
+		if (!isObject(context) && !isFunction(context)) return false
 		const failures: unknown = INTRINSICS.reflect.read(context, 'failures')
 		return failures === undefined || isArray(failures)
 	})
