@@ -35,6 +35,53 @@ export interface FloorFixture {
 	readonly attempts: number
 }
 
+/** Owns the hook state of one real floor pool. */
+class FloorObserver implements FloorFixture {
+	readonly pool: Pool<FloorResource>
+	readonly #resources: FloorResource[] = []
+	readonly #destroyed: FloorResource[] = []
+	readonly #signals = new Map<FloorResource, AbortSignal>()
+	#attempts = 0
+
+	constructor(options: Partial<PoolOptions<FloorResource>>) {
+		this.pool = new Pool<FloorResource>({
+			min: 1,
+			restarts: 1,
+			...options,
+			create: async () => {
+				this.#attempts += 1
+				const resource = await (options.create?.() ?? { loss: Promise.withResolvers<void>() })
+				this.#resources.push(resource)
+				return resource
+			},
+			destroy: (resource) => {
+				this.#destroyed.push(resource)
+				return options.destroy?.(resource)
+			},
+			watch: (resource, signal) => {
+				this.#signals.set(resource, signal)
+				return options.watch?.(resource, signal) ?? resource.loss.promise
+			},
+		})
+	}
+
+	get resources(): readonly FloorResource[] {
+		return this.#resources
+	}
+
+	get destroyed(): readonly FloorResource[] {
+		return this.#destroyed
+	}
+
+	get signals(): ReadonlyMap<FloorResource, AbortSignal> {
+		return this.#signals
+	}
+
+	get attempts(): number {
+		return this.#attempts
+	}
+}
+
 /** Creates a real pool with recorded boundary hooks and deferred loss notifications.
  * @param options - Overrides for the pool's resource hooks and floor settings
  * @returns The pool and the observations made by its hooks
@@ -42,36 +89,5 @@ export interface FloorFixture {
 export function createFloorFixture(
 	options: Partial<PoolOptions<FloorResource>> = {},
 ): FloorFixture {
-	const resources: FloorResource[] = []
-	const destroyed: FloorResource[] = []
-	const signals = new Map<FloorResource, AbortSignal>()
-	let attempts = 0
-	const pool = new Pool<FloorResource>({
-		min: 1,
-		restarts: 1,
-		...options,
-		create: async () => {
-			attempts += 1
-			const resource = await (options.create?.() ?? { loss: Promise.withResolvers<void>() })
-			resources.push(resource)
-			return resource
-		},
-		destroy: (resource) => {
-			destroyed.push(resource)
-			return options.destroy?.(resource)
-		},
-		watch: (resource, signal) => {
-			signals.set(resource, signal)
-			return options.watch?.(resource, signal) ?? resource.loss.promise
-		},
-	})
-	return {
-		pool,
-		resources,
-		destroyed,
-		signals,
-		get attempts() {
-			return attempts
-		},
-	}
+	return new FloorObserver(options)
 }

@@ -1,4 +1,5 @@
 import type { EmitterErrorHandler, EmitterInterface } from '@orkestrel/emitter'
+import type { Result } from '@orkestrel/contract'
 import type { PoolCode, PoolEventMap, PoolInterface, PoolOptions, PoolToken } from './types.js'
 import { Emitter } from '@orkestrel/emitter'
 import { attempt, isFunction, isNumber } from '@orkestrel/contract'
@@ -262,13 +263,8 @@ export class Pool<T> implements PoolInterface<T> {
 
 	#createAbort(waiter: PromiseWithResolvers<PoolToken<T>>, signal: AbortSignal): () => void {
 		return (): void => {
-			let reason: unknown
-			try {
-				reason = this.#state(signal)[1]
-			} catch (error: unknown) {
-				reason = error
-			}
-			this.#abort(waiter, reason)
+			const state = attempt(() => this.#state(signal))
+			this.#abort(waiter, state.success ? state.value[1] : state.error)
 		}
 	}
 
@@ -402,31 +398,31 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	#occupancy(record: object): number {
-		let count = this.#leased.get(record)?.size ?? 0
-		for (const result of this.#ready.values()) {
-			if (result.success && result.record === record) count += 1
-		}
-		return count
+		const leased = this.#leased.get(record)?.size ?? 0
+		return this.#ready.values().reduce((count, result) => {
+			return count + (result.success && result.record === record ? 1 : 0)
+		}, leased)
 	}
 
 	#select(): object | undefined {
-		let selected: object | undefined
-		let least = this.#capacity
-		for (const record of this.#resources.keys()) {
-			if (
-				this.#validating.has(record) ||
-				this.#destroying.has(record) ||
-				this.#survivors.has(record)
-			)
-				continue
-			const count = this.#occupancy(record)
-			if (count === 0 && !this.#available.includes(record)) continue
-			if (count < least) {
-				selected = record
-				least = count
-			}
-		}
-		return this.#available[0] ?? selected
+		const selected = this.#resources.keys().reduce<{
+			readonly record?: object
+			readonly count: number
+		}>(
+			(candidate, record) => {
+				if (
+					this.#validating.has(record) ||
+					this.#destroying.has(record) ||
+					this.#survivors.has(record)
+				)
+					return candidate
+				const count = this.#occupancy(record)
+				if (count === 0 && !this.#available.includes(record)) return candidate
+				return count < candidate.count ? { record, count } : candidate
+			},
+			{ count: this.#capacity },
+		)
+		return this.#available[0] ?? selected.record
 	}
 
 	#spent(): boolean {
@@ -466,15 +462,21 @@ export class Pool<T> implements PoolInterface<T> {
 
 	async #refill(): Promise<void> {
 		if (this.#ending !== undefined) return
-		let value: T
-		try {
-			value = await this.#create()
-		} catch (error: unknown) {
-			this.#addStrike(error)
+		const creation = await this.#produce()
+		if (!creation.success) {
+			this.#addStrike(creation.error)
 			return
 		}
-		const record = this.#insert(value)
+		const record = this.#insert(creation.value)
 		this.#recycle(record)
+	}
+
+	async #produce(): Promise<Result<T>> {
+		try {
+			return { success: true, value: await this.#create() }
+		} catch (error: unknown) {
+			return { success: false, error }
+		}
 	}
 
 	#insert(value: T): object {
@@ -563,15 +565,13 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	async #createResource(waiter: PromiseWithResolvers<PoolToken<T>>): Promise<void> {
-		let value: T
-		try {
-			value = await this.#create()
-		} catch (error: unknown) {
+		const creation = await this.#produce()
+		if (!creation.success) {
 			this.#reservations.delete(waiter)
 			if (this.#waiters.includes(waiter)) {
 				this.#ready.set(waiter, {
 					success: false,
-					error: new PoolError({ code: 'create', cause: error }),
+					error: new PoolError({ code: 'create', cause: creation.error }),
 				})
 			} else {
 				this.#assigned.delete(waiter)
@@ -580,6 +580,7 @@ export class Pool<T> implements PoolInterface<T> {
 			return
 		}
 
+		const value = creation.value
 		this.#reservations.delete(waiter)
 		const record = this.#insert(value)
 		if (this.#ending !== undefined) {
@@ -607,10 +608,7 @@ export class Pool<T> implements PoolInterface<T> {
 		record: object,
 		value: T,
 	): Promise<void> {
-		let valid = false
-		try {
-			valid = (await this.#validate?.(value)) === true
-		} catch {}
+		const valid = await this.#check(value)
 		this.#validating.delete(record)
 		if (
 			!this.#resources.has(record) ||
@@ -665,6 +663,14 @@ export class Pool<T> implements PoolInterface<T> {
 		}
 		this.#assigned.delete(waiter)
 		this.#pump()
+	}
+
+	async #check(value: T): Promise<boolean> {
+		try {
+			return (await this.#validate?.(value)) === true
+		} catch {
+			return false
+		}
 	}
 
 	#prepare(waiter: PromiseWithResolvers<PoolToken<T>>, record: object, value: T): void {
@@ -787,29 +793,16 @@ export class Pool<T> implements PoolInterface<T> {
 	}
 
 	async #clean(record: object, value: T, cleanup: PromiseWithResolvers<void>): Promise<void> {
-		let disposal: Promise<void>
-		try {
-			disposal = Promise.resolve(this.#destroy?.(value))
-		} catch (error: unknown) {
-			disposal = Promise.reject(error)
-		}
-		let failure: unknown
-		let failed = false
-		try {
-			await disposal
-		} catch (error: unknown) {
-			failure = error
-			failed = true
-		}
-		if (failed && this.#min !== undefined) {
-			this.#survivors.set(record, failure)
-			this.#record(failure)
+		const disposal = await this.#disposeValue(value)
+		if (!disposal.success && this.#min !== undefined) {
+			this.#survivors.set(record, disposal.error)
+			this.#record(disposal.error)
 		} else {
 			this.#resources.delete(record)
 			if (this.#owing.has(record)) this.#owed += 1
 		}
 		this.#owing.delete(record)
-		if (failed) cleanup.reject(failure)
+		if (!disposal.success) cleanup.reject(disposal.error)
 		else cleanup.resolve()
 		// Cleanup owners must bind outcomes before destroy observers can reenter.
 		await Promise.resolve()
@@ -817,6 +810,16 @@ export class Pool<T> implements PoolInterface<T> {
 		this.#destroying.delete(record)
 		if (this.#min !== undefined) this.#pump()
 		this.#finish()
+	}
+
+	async #disposeValue(value: T): Promise<Result<void>> {
+		const disposal = attempt(() => Promise.resolve(this.#destroy?.(value)))
+		try {
+			await (disposal.success ? disposal.value : Promise.reject(disposal.error))
+			return { success: true, value: undefined }
+		} catch (error: unknown) {
+			return { success: false, error }
+		}
 	}
 
 	async #settleClear(cleanups: ReadonlyArray<Promise<void>>): Promise<void> {
@@ -868,17 +871,16 @@ export class Pool<T> implements PoolInterface<T> {
 	#finish(): void {
 		const ending = this.#ending
 		if (ending === undefined || this.#operations.size > 0 || this.#owned.size > 0) return
-		let claimed = false
-		for (const record of this.#resources.keys()) {
+		const claimed = this.#resources.keys().reduce((previous, record) => {
 			if (
 				this.#validating.has(record) ||
 				this.#destroying.has(record) ||
 				this.#survivors.has(record)
 			)
-				continue
-			claimed = true
+				return previous
 			this.#own(this.#dispose(record))
-		}
+			return true
+		}, false)
 		if (claimed || this.#resources.size > this.#survivors.size || this.#destroying.size > 0) return
 		this.#emitter.destroy()
 		if (this.#failures.length > 0) ending.reject(this.#cleanupError(this.#failures))

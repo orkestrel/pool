@@ -1,4 +1,4 @@
-import type { PoolEventMap } from '@src/core'
+import type { PoolEventMap, PoolToken } from '@src/core'
 import type { PoolEvent } from '../../setup.js'
 import { describe, expect, it } from 'vitest'
 import { Pool, PoolError, isPoolError, isPoolSignal } from '@src/core'
@@ -10,6 +10,75 @@ import { EventEmitter, getEventListeners, once } from 'node:events'
 import { createRecorder, createRecorders, waitForDelay } from '@orkestrel/test'
 import { POOL_EVENTS, createFloorFixture } from '../../setup.js'
 
+class SpecializedPoolError extends PoolError {}
+
+class HookSequence {
+	#count = 0
+
+	get count(): number {
+		return this.#count
+	}
+
+	next(): number {
+		const value = this.#count
+		this.#count += 1
+		return value
+	}
+
+	advance(): number {
+		this.#count += 1
+		return this.#count
+	}
+}
+
+class HookCondition {
+	#value: boolean
+
+	constructor(value: boolean) {
+		this.#value = value
+	}
+
+	get value(): boolean {
+		return this.#value
+	}
+
+	set(value: boolean): void {
+		this.#value = value
+	}
+}
+
+class ReentrantClient {
+	#pending: Promise<PoolToken<number>> | undefined
+	#completion: Promise<void> | undefined
+
+	get pending(): Promise<PoolToken<number>> | undefined {
+		return this.#pending
+	}
+
+	get completion(): Promise<void> | undefined {
+		return this.#completion
+	}
+
+	acquire(pool: Pool<number>): void {
+		if (this.#pending !== undefined) throw new Error('reentrant acquisition already started')
+		this.#pending = pool.acquire()
+		void this.#pending.catch(() => {})
+	}
+
+	consume(observe: (value: number) => void): Promise<void> {
+		if (this.#completion !== undefined) throw new Error('reentrant consumption already started')
+		if (this.#pending === undefined) throw new Error('destroy listener did not reenter acquisition')
+		this.#completion = this.#pending.then((token) => {
+			try {
+				observe(token.value)
+			} finally {
+				token.release()
+			}
+		})
+		return this.#completion
+	}
+}
+
 describe('Pool sharing', () => {
 	it('rejects invalid per-record capacity and snapshots it once', async () => {
 		for (const capacity of [0, -0, -1, 1.5, Number.NaN, Infinity, 2 ** 53]) {
@@ -17,18 +86,18 @@ describe('Pool sharing', () => {
 				expect.objectContaining({ code: 'invalid' }),
 			)
 		}
-		let reads = 0
+		const reads = new HookSequence()
 		const pool = new Pool({
 			create: () => 0,
 			max: 1,
 			get capacity() {
-				reads += 1
-				return reads === 1 ? 2 : 0
+				reads.advance()
+				return reads.count === 1 ? 2 : 0
 			},
 		})
 		try {
 			await pool.acquire()
-			expect(reads).toBe(1)
+			expect(reads.count).toBe(1)
 		} finally {
 			await pool.destroy()
 		}
@@ -83,12 +152,12 @@ describe('Pool sharing', () => {
 	it('reserves ready shared handouts before FIFO settlement and recycles cancellation', async () => {
 		const validation = Promise.withResolvers<boolean>()
 		// The older record holds the FIFO head in validation.
-		let created = 0
+		const created = new HookSequence()
 		const pool = new Pool({
 			min: 2,
 			restarts: 1,
 			capacity: 2,
-			create: () => ++created,
+			create: () => created.advance(),
 			validate: (value) => (value === 1 ? validation.promise : true),
 		})
 		const controller = new AbortController()
@@ -126,15 +195,15 @@ describe('Pool sharing', () => {
 	})
 
 	it('disposes a shared loss once and grants only one owed refill on a spent floor', async () => {
-		let calls = 0
+		const calls = new HookSequence()
 		const failure = new Error('refill fails')
 		const fixture = createFloorFixture({
 			min: 2,
 			restarts: 0,
 			capacity: 2,
 			create: () => {
-				calls += 1
-				if (calls > 1) throw failure
+				calls.advance()
+				if (calls.count > 1) throw failure
 				return { loss: Promise.withResolvers<void>() }
 			},
 		})
@@ -148,9 +217,12 @@ describe('Pool sharing', () => {
 			second.release()
 			await Promise.all([first.destroy(), second.destroy()])
 			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create', cause: failure })
-			expect([fixture.destroyed.length, calls, fixture.pool.size, fixture.pool.active]).toEqual([
-				1, 3, 0, 0,
-			])
+			expect([
+				fixture.destroyed.length,
+				calls.count,
+				fixture.pool.size,
+				fixture.pool.active,
+			]).toEqual([1, 3, 0, 0])
 		} finally {
 			await fixture.pool.destroy()
 		}
@@ -183,24 +255,24 @@ describe('Pool sharing', () => {
 	})
 
 	it('skips validation while sharing and validates again only after the last release', async () => {
-		let validations = 0
+		const validations = new HookSequence()
 		const fixture = createFloorFixture({
 			capacity: 2,
-			validate: () => ++validations !== 2,
+			validate: () => validations.advance() !== 2,
 		})
 		try {
 			await fixture.pool.start()
 			const first = await fixture.pool.acquire()
 			const second = await fixture.pool.acquire()
-			expect([validations, fixture.destroyed.length]).toEqual([1, 0])
+			expect([validations.count, fixture.destroyed.length]).toEqual([1, 0])
 			first.release()
 			const third = await fixture.pool.acquire()
-			expect([validations, fixture.destroyed.length]).toEqual([1, 0])
+			expect([validations.count, fixture.destroyed.length]).toEqual([1, 0])
 			second.release()
 			third.release()
 			const next = await fixture.pool.acquire()
 			expect(next.value).not.toBe(first.value)
-			expect([validations, fixture.destroyed.length]).toEqual([3, 1])
+			expect([validations.count, fixture.destroyed.length]).toEqual([3, 1])
 		} finally {
 			await fixture.pool.destroy()
 		}
@@ -250,14 +322,14 @@ describe('Pool sharing', () => {
 		const disposal = Promise.withResolvers<void>()
 		const failure = new Error('shared cleanup fails')
 		const refill = new Error('floor refill fails')
-		let calls = 0
+		const calls = new HookSequence()
 		const fixture = createFloorFixture({
 			min: 2,
 			restarts: 0,
 			capacity: 2,
 			create: () => {
-				calls += 1
-				if (calls > 1) throw refill
+				calls.advance()
+				if (calls.count > 1) throw refill
 				return { loss: Promise.withResolvers<void>() }
 			},
 			destroy: () => disposal.promise,
@@ -378,13 +450,13 @@ describe('Pool floor', () => {
 		const second = Promise.withResolvers<number>()
 		const entered = Promise.withResolvers<void>()
 		const cause = new Error('last refill')
-		let calls = 0
+		const calls = new HookSequence()
 		const pool = new Pool({
 			min: 1,
 			restarts: 1,
 			create: () => {
-				calls += 1
-				if (calls === 1) return first.promise
+				calls.advance()
+				if (calls.count === 1) return first.promise
 				entered.resolve()
 				return second.promise
 			},
@@ -396,29 +468,29 @@ describe('Pool floor', () => {
 			void acquiring.catch(() => {})
 			first.reject(new Error('first refill'))
 			await Promise.race([entered.promise, starting])
-			expect(calls).toBe(2)
+			expect(calls.count).toBe(2)
 			second.reject(cause)
 			await expect(starting).rejects.toMatchObject({ code: 'create', cause })
 			await expect(acquiring).rejects.toMatchObject({ code: 'create', cause })
 			await expect(pool.acquire()).rejects.toMatchObject({ code: 'create', cause })
-			expect(calls).toBe(2)
+			expect(calls.count).toBe(2)
 		} finally {
 			await pool.destroy()
 		}
 	})
 
 	it('restarts a spent floor and resets strikes on a granted lease', async () => {
-		let fails = true
+		const fails = new HookCondition(true)
 		const fixture = createFloorFixture({
 			restarts: 0,
 			create: () => {
-				if (fails) throw new Error('refill')
+				if (fails.value) throw new Error('refill')
 				return { loss: Promise.withResolvers<void>() }
 			},
 		})
 		try {
 			await expect(fixture.pool.start()).rejects.toMatchObject({ code: 'create' })
-			fails = false
+			fails.set(false)
 			await fixture.pool.start()
 			const token = await fixture.pool.acquire()
 			await token.destroy()
@@ -534,8 +606,8 @@ describe('Pool floor', () => {
 	})
 
 	it('aborts watch when validation refuses a record', async () => {
-		let checks = 0
-		const fixture = createFloorFixture({ validate: () => ++checks > 1 })
+		const checks = new HookSequence()
+		const fixture = createFloorFixture({ validate: () => checks.advance() > 1 })
 		try {
 			await fixture.pool.start()
 			const resource = fixture.resources[0]
@@ -659,12 +731,12 @@ describe('Pool floor races', () => {
 		const entered = Promise.withResolvers<void>()
 		const refill = Promise.withResolvers<never>()
 		const cause = new Error('earlier slot refill failed')
-		let calls = 0
+		const calls = new HookSequence()
 		const fixture = createFloorFixture({
 			min: 3,
 			restarts: 2,
 			create: () => {
-				if (++calls === 4) return refill.promise
+				if (calls.advance() === 4) return refill.promise
 				return { loss: Promise.withResolvers<void>() }
 			},
 			destroy: (resource) => {
@@ -749,13 +821,13 @@ describe('Pool floor races', () => {
 	it('ignores rejecting watches aborted by every disposal path', async () => {
 		const emitter = new EventEmitter()
 		const errors = createRecorder<readonly [unknown, string]>()
-		let valid = true
+		const valid = new HookCondition(true)
 		const fixture = createFloorFixture({
 			watch: (_resource, signal) => once(emitter, 'event', { signal }),
 			error: errors.handler,
 			validate: () => {
-				const result = valid
-				valid = true
+				const result = valid.value
+				valid.set(true)
 				return result
 			},
 		})
@@ -763,7 +835,7 @@ describe('Pool floor races', () => {
 			await fixture.pool.start()
 			await fixture.pool.clear()
 			await fixture.pool.start()
-			valid = false
+			valid.set(false)
 			const token = await fixture.pool.acquire()
 			await token.destroy()
 			await fixture.pool.start()
@@ -872,11 +944,11 @@ describe('Pool floor races', () => {
 		const validating = Promise.withResolvers<void>()
 		const cleanup = Promise.withResolvers<void>()
 		const disposing = Promise.withResolvers<void>()
-		let checks = 0
+		const checks = new HookSequence()
 		const fixture = createFloorFixture({
 			restarts: 1,
 			validate: () => {
-				if (++checks > 1) return true
+				if (checks.advance() > 1) return true
 				validating.resolve()
 				return validation.promise
 			},
@@ -909,12 +981,12 @@ describe('Pool floor races', () => {
 		const cleanup = Promise.withResolvers<void>()
 		const acquiring = Promise.withResolvers<unknown>()
 		const cause = new Error('replacement failure')
-		let calls = 0
+		const calls = new HookSequence()
 		const pool = new Pool({
 			min: 1,
 			restarts: 0,
 			create: () => {
-				if (++calls > 1) throw cause
+				if (calls.advance() > 1) throw cause
 				return 1
 			},
 			destroy: () => {
@@ -934,7 +1006,7 @@ describe('Pool floor races', () => {
 			cleanup.resolve()
 			await destroying
 			await expect(acquiring.promise).rejects.toMatchObject({ code: 'create', cause })
-			expect(calls).toBe(2)
+			expect(calls.count).toBe(2)
 		} finally {
 			cleanup.resolve()
 			await pool.destroy()
@@ -1074,12 +1146,12 @@ describe('Pool floor races', () => {
 	})
 
 	it('counts an owed refill failure and refuses another attempt', async () => {
-		let fails = false
+		const fails = new HookCondition(false)
 		const cause = new Error('owed failure')
 		const fixture = createFloorFixture({
 			min: 2,
 			create: () => {
-				if (fails) throw cause
+				if (fails.value) throw cause
 				return { loss: Promise.withResolvers<void>() }
 			},
 		})
@@ -1090,7 +1162,7 @@ describe('Pool floor races', () => {
 			await waitForDelay()
 			fixture.resources[2]?.loss.resolve()
 			await waitForDelay()
-			fails = true
+			fails.set(true)
 			await leased.destroy()
 			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create', cause })
 			expect([fixture.attempts, fixture.pool.size]).toEqual([4, 0])
@@ -1101,12 +1173,12 @@ describe('Pool floor races', () => {
 
 	it('preserves the owed attempt when a leased loss arrives during a failing refill', async () => {
 		const refill = Promise.withResolvers<never>()
-		let calls = 0
+		const calls = new HookSequence()
 		const fixture = createFloorFixture({
 			min: 2,
 			create: () => {
-				calls += 1
-				if (calls === 3) return refill.promise
+				calls.advance()
+				if (calls.count === 3) return refill.promise
 				return { loss: Promise.withResolvers<void>() }
 			},
 		})
@@ -1115,11 +1187,11 @@ describe('Pool floor races', () => {
 			const leased = await fixture.pool.acquire()
 			fixture.resources[1]?.loss.resolve()
 			await waitForDelay()
-			expect(calls).toBe(3)
+			expect(calls.count).toBe(3)
 			await leased.destroy()
 			refill.reject(new Error('in-flight refill'))
 			await waitForDelay()
-			expect([calls, fixture.pool.size, fixture.pool.idle]).toEqual([4, 1, 1])
+			expect([calls.count, fixture.pool.size, fixture.pool.idle]).toEqual([4, 1, 1])
 		} finally {
 			refill.reject(new Error('test cleanup'))
 			await fixture.pool.destroy()
@@ -1127,12 +1199,12 @@ describe('Pool floor races', () => {
 	})
 
 	it('preserves the owed attempt when the refill fails before the leased loss', async () => {
-		let calls = 0
+		const calls = new HookSequence()
 		const fixture = createFloorFixture({
 			min: 2,
 			create: () => {
-				calls += 1
-				if (calls === 3) throw new Error('refill')
+				calls.advance()
+				if (calls.count === 3) throw new Error('refill')
 				return { loss: Promise.withResolvers<void>() }
 			},
 		})
@@ -1144,22 +1216,22 @@ describe('Pool floor races', () => {
 			await expect(fixture.pool.acquire()).rejects.toMatchObject({ code: 'create' })
 			await leased.destroy()
 			await waitForDelay()
-			expect([calls, fixture.pool.size, fixture.pool.idle]).toEqual([4, 1, 1])
+			expect([calls.count, fixture.pool.size, fixture.pool.idle]).toEqual([4, 1, 1])
 		} finally {
 			await fixture.pool.destroy()
 		}
 	})
 
 	it('keeps a failing refill spent when holders destroy older healthy grants', async () => {
-		let calls = 0
+		const calls = new HookSequence()
 		const invalid = new WeakSet<object>()
 		const fixture = createFloorFixture({
 			min: 2,
 			restarts: 1,
 			create: () => {
-				calls += 1
+				calls.advance()
 				const resource = { loss: Promise.withResolvers<void>() }
-				if (calls === 1 || calls === 3) invalid.add(resource)
+				if (calls.count === 1 || calls.count === 3) invalid.add(resource)
 				return resource
 			},
 			validate: (resource) => !invalid.has(resource),
@@ -1187,14 +1259,14 @@ describe('Pool floor races', () => {
 	})
 
 	it('does not reopen failed creates when granting a record older than the last strike', async () => {
-		let calls = 0
+		const calls = new HookSequence()
 		const cause = new Error('failing refill')
 		const fixture = createFloorFixture({
 			min: 2,
 			restarts: 1,
 			create: () => {
-				calls += 1
-				if (calls > 1) throw cause
+				calls.advance()
+				if (calls.count > 1) throw cause
 				return { loss: Promise.withResolvers<void>() }
 			},
 		})
@@ -1234,11 +1306,11 @@ describe('Pool floor races', () => {
 	})
 
 	it('resets strikes at a lease grant and strikes a previously leased idle record', async () => {
-		let calls = 0
+		const calls = new HookSequence()
 		const fixture = createFloorFixture({
 			create: () => {
-				calls += 1
-				if (calls === 1 || calls === 3) throw new Error('refill')
+				calls.advance()
+				if (calls.count === 1 || calls.count === 3) throw new Error('refill')
 				return { loss: Promise.withResolvers<void>() }
 			},
 		})
@@ -1248,7 +1320,7 @@ describe('Pool floor races', () => {
 			token.release()
 			token.value.loss.resolve()
 			await waitForDelay()
-			expect([calls, fixture.pool.idle]).toEqual([3, 0])
+			expect([calls.count, fixture.pool.idle]).toEqual([3, 0])
 		} finally {
 			await fixture.pool.destroy()
 		}
@@ -1257,11 +1329,11 @@ describe('Pool floor races', () => {
 	it('never grants a record lost during validation', async () => {
 		const validation = Promise.withResolvers<boolean>()
 		const entered = Promise.withResolvers<void>()
-		let checks = 0
+		const checks = new HookSequence()
 		const fixture = createFloorFixture({
 			validate: () => {
-				checks += 1
-				if (checks > 1) return true
+				checks.advance()
+				if (checks.count > 1) return true
 				entered.resolve()
 				return validation.promise
 			},
@@ -1286,12 +1358,12 @@ describe('Pool floor races', () => {
 
 	it('never grants a lost ready record behind a slower FIFO head', async () => {
 		const validation = Promise.withResolvers<boolean>()
-		let checks = 0
+		const checks = new HookSequence()
 		const fixture = createFloorFixture({
 			min: 2,
 			validate: () => {
-				checks += 1
-				return checks === 1 ? validation.promise : true
+				checks.advance()
+				return checks.count === 1 ? validation.promise : true
 			},
 		})
 		try {
@@ -1299,7 +1371,7 @@ describe('Pool floor races', () => {
 			const first = fixture.pool.acquire()
 			const second = fixture.pool.acquire()
 			await waitForDelay()
-			expect(checks).toBe(2)
+			expect(checks.count).toBe(2)
 			const lost = fixture.resources[1]
 			lost?.loss.resolve()
 			await waitForDelay()
@@ -1378,6 +1450,53 @@ describe('Pool floor races', () => {
 })
 
 describe('Pool validation and errors', () => {
+	it('recognizes own error identity and declared members without reading the name', () => {
+		const brand = Symbol.for('@orkestrel/pool.PoolError')
+		const error = new PoolError({ code: 'invalid', context: { failures: [undefined] } })
+		expect(Object.getOwnPropertyDescriptor(error, brand)).toEqual({
+			value: error,
+			writable: false,
+			enumerable: false,
+			configurable: false,
+		})
+		Object.defineProperty(error, 'name', {
+			get() {
+				throw new Error('name must not be read')
+			},
+		})
+		expect(isPoolError(error)).toBe(true)
+		const subclass = new SpecializedPoolError({ code: 'destroyed' })
+		subclass.name = 'SpecializedPoolError'
+		expect(isPoolError(subclass)).toBe(true)
+		expect(isPoolError(new Proxy(error, {}))).toBe(false)
+		expect(isPoolError(Object.assign(new Error('lookalike'), { code: 'invalid' }))).toBe(false)
+		const plain = { code: 'invalid' }
+		Object.defineProperty(plain, brand, { value: plain })
+		expect(isPoolError(plain)).toBe(false)
+		const base = Object.assign(new Error('base'), { code: 'invalid' })
+		Object.defineProperty(base, brand, { value: base })
+		expect(isPoolError(base)).toBe(false)
+		for (const code of ['invalid', 'destroyed', 'create', 'cleanup']) {
+			Reflect.set(error, 'code', code)
+			expect(isPoolError(error)).toBe(true)
+		}
+		for (const code of ['unknown', undefined, null, 1]) {
+			Reflect.set(error, 'code', code)
+			expect(isPoolError(error)).toBe(false)
+		}
+		Reflect.set(error, 'code', 'invalid')
+		for (const context of [null, 1, { failures: 'invalid' }, { failures: null }]) {
+			Reflect.set(error, 'context', context)
+			expect(isPoolError(error)).toBe(false)
+		}
+		Object.defineProperty(error, 'context', {
+			get() {
+				throw new Error('unreadable context')
+			},
+		})
+		expect(isPoolError(error)).toBe(false)
+	})
+
 	it('rejects a maximum that is not a positive safe integer and accepts omission as unbounded', () => {
 		for (const value of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53]) {
 			expect(() => new Pool({ create: () => 0, max: value })).toThrow(PoolError)
@@ -1391,33 +1510,35 @@ describe('Pool validation and errors', () => {
 		const initialErrors = createRecorder<readonly [error: unknown, event: string]>()
 		const laterErrors = createRecorder<readonly [error: unknown, event: string]>()
 		const listenerFailure = new Error('volatile listener failed')
-		let maxReads = 0
-		let onReads = 0
-		let errorReads = 0
+		const maxReads = new HookSequence()
+		const onReads = new HookSequence()
+		const errorReads = new HookSequence()
 		const pool = new Pool({
 			create: () => 0,
 			get max() {
-				maxReads += 1
-				return maxReads === 1 ? 1 : 0
+				maxReads.advance()
+				return maxReads.count === 1 ? 1 : 0
 			},
 			get on() {
-				onReads += 1
-				return onReads === 1 ? { create: initialCreate.handler } : { create: laterCreate.handler }
+				onReads.advance()
+				return onReads.count === 1
+					? { create: initialCreate.handler }
+					: { create: laterCreate.handler }
 			},
 			get error() {
-				errorReads += 1
-				return errorReads === 1 ? initialErrors.handler : laterErrors.handler
+				errorReads.advance()
+				return errorReads.count === 1 ? initialErrors.handler : laterErrors.handler
 			},
 		})
 
 		try {
-			expect([maxReads, onReads, errorReads]).toEqual([1, 1, 1])
+			expect([maxReads.count, onReads.count, errorReads.count]).toEqual([1, 1, 1])
 			pool.emitter.on('acquire', () => {
 				throw listenerFailure
 			})
 			const first = await pool.acquire()
 			try {
-				expect([maxReads, pool.size, pool.active]).toEqual([1, 1, 1])
+				expect([maxReads.count, pool.size, pool.active]).toEqual([1, 1, 1])
 				expect(initialCreate.count).toBe(1)
 				expect(laterCreate.count).toBe(0)
 				expect(initialErrors.calls).toEqual([[listenerFailure, 'acquire']])
@@ -1518,14 +1639,10 @@ describe('Pool ownership and counts', () => {
 			shared,
 			shared,
 		]
-		let index = 0
+		const sequence = values.values()
 		const destroyed = createRecorder<[unknown]>()
 		const pool = new Pool<unknown>({
-			create: () => {
-				const value = values[index]
-				index += 1
-				return value
-			},
+			create: () => sequence.next().value,
 			destroy: destroyed.handler,
 			max: values.length,
 		})
@@ -1599,8 +1716,11 @@ describe('Pool FIFO acquisition', () => {
 			Promise.withResolvers<number>(),
 		]
 		const settled = createRecorder<[number]>()
-		let created = 0
-		const pool = new Pool({ create: () => gates[created++]?.promise ?? Promise.reject(), max: 3 })
+		const created = new HookSequence()
+		const pool = new Pool({
+			create: () => gates[created.next()]?.promise ?? Promise.reject(),
+			max: 3,
+		})
 		const first = pool.acquire()
 		const second = pool.acquire()
 		const third = pool.acquire()
@@ -1609,7 +1729,7 @@ describe('Pool FIFO acquisition', () => {
 		void third.then(() => settled.handler(2))
 
 		await Promise.resolve()
-		expect(created).toBe(3)
+		expect(created.count).toBe(3)
 		expect(pool.size).toBe(0)
 		gates[1]?.resolve(20)
 		gates[2]?.resolve(30)
@@ -1625,30 +1745,30 @@ describe('Pool FIFO acquisition', () => {
 	})
 
 	it('does not create beyond capacity while records are leased or reserved', async () => {
-		let created = 0
-		const pool = new Pool({ create: () => created++, max: 1 })
+		const created = new HookSequence()
+		const pool = new Pool({ create: () => created.next(), max: 1 })
 		const first = await pool.acquire()
 		const second = pool.acquire()
 		const third = pool.acquire()
 
 		await Promise.resolve()
-		expect(created).toBe(1)
+		expect(created.count).toBe(1)
 		first.release()
 		const next = await second
-		expect([next.value, created]).toEqual([0, 1])
+		expect([next.value, created.count]).toEqual([0, 1])
 		next.release()
 		await expect(third).resolves.toMatchObject({ value: 0 })
-		expect(created).toBe(1)
+		expect(created.count).toBe(1)
 	})
 
 	it('overlaps validations while retaining FIFO settlement', async () => {
 		const gates = [Promise.withResolvers<boolean>(), Promise.withResolvers<boolean>()]
 		const settled = createRecorder<[number]>()
-		let created = 0
-		let validated = 0
+		const created = new HookSequence()
+		const validated = new HookSequence()
 		const pool = new Pool({
-			create: () => created++,
-			validate: () => gates[validated++]?.promise ?? false,
+			create: () => created.next(),
+			validate: () => gates[validated.next()]?.promise ?? false,
 			max: 2,
 		})
 		const held = await Promise.all([pool.acquire(), pool.acquire()])
@@ -1658,7 +1778,7 @@ describe('Pool FIFO acquisition', () => {
 		void first.then(() => settled.handler(0))
 		void second.then(() => settled.handler(1))
 		await Promise.resolve()
-		expect(validated).toBe(2)
+		expect(validated.count).toBe(2)
 		gates[1]?.resolve(true)
 		await Promise.resolve()
 		await Promise.resolve()
@@ -1670,8 +1790,11 @@ describe('Pool FIFO acquisition', () => {
 
 	it('rejects a failed create with code and continues later FIFO waiters', async () => {
 		const gates = [Promise.withResolvers<number>(), Promise.withResolvers<number>()]
-		let created = 0
-		const pool = new Pool({ create: () => gates[created++]?.promise ?? Promise.reject(), max: 2 })
+		const created = new HookSequence()
+		const pool = new Pool({
+			create: () => gates[created.next()]?.promise ?? Promise.reject(),
+			max: 2,
+		})
 		const first = pool.acquire()
 		const second = pool.acquire()
 		const failure = new Error('creation failed')
@@ -1684,9 +1807,9 @@ describe('Pool FIFO acquisition', () => {
 	})
 
 	it('validates a released handoff and emits release only when a record actually stays idle', async () => {
-		let healthy = true
-		let created = 0
-		const pool = new Pool({ create: () => created++, validate: () => healthy, max: 1 })
+		const healthy = new HookCondition(true)
+		const created = new HookSequence()
+		const pool = new Pool({ create: () => created.next(), validate: () => healthy.value, max: 1 })
 		const events = createRecorders<PoolEventMap, PoolEvent>(pool.emitter, POOL_EVENTS)
 		const held = await pool.acquire()
 		const waiting = pool.acquire()
@@ -1697,7 +1820,7 @@ describe('Pool FIFO acquisition', () => {
 		served.release()
 		expect(events.release.count).toBe(1)
 
-		healthy = false
+		healthy.set(false)
 		const replacing = pool.acquire()
 		const replacement = await replacing
 		expect(replacement.value).toBe(1)
@@ -1766,10 +1889,13 @@ describe('Pool cancellation', () => {
 
 	it('aborts a ready result behind a slow head and returns that record to idle', async () => {
 		const gates = [Promise.withResolvers<number>(), Promise.withResolvers<number>()]
-		let created = 0
+		const created = new HookSequence()
 		const controller = new AbortController()
 		const reason = new Error('ready abort')
-		const pool = new Pool({ create: () => gates[created++]?.promise ?? Promise.reject(), max: 2 })
+		const pool = new Pool({
+			create: () => gates[created.next()]?.promise ?? Promise.reject(),
+			max: 2,
+		})
 		const first = pool.acquire()
 		const second = pool.acquire(controller.signal)
 
@@ -1788,13 +1914,13 @@ describe('Pool cancellation', () => {
 		const validation = Promise.withResolvers<boolean>()
 		const controller = new AbortController()
 		const reason = new Error('validation abort')
-		let validations = 0
-		let created = 0
+		const validations = new HookSequence()
+		const created = new HookSequence()
 		const pool = new Pool({
-			create: () => created++,
+			create: () => created.next(),
 			validate: () => {
-				validations += 1
-				return validations === 1 ? validation.promise : true
+				validations.advance()
+				return validations.count === 1 ? validation.promise : true
 			},
 			max: 1,
 		})
@@ -1808,20 +1934,20 @@ describe('Pool cancellation', () => {
 		const next = pool.acquire()
 		validation.resolve(true)
 		await expect(next).resolves.toMatchObject({ value: 0 })
-		expect([created, pool.size, pool.active]).toEqual([1, 1, 1])
+		expect([created.count, pool.size, pool.active]).toEqual([1, 1, 1])
 	})
 })
 
 describe('Pool validation and cleanup ownership', () => {
 	it('treats false and thrown validation as invalid and replaces only after cleanup', async () => {
 		const cleanup = Promise.withResolvers<void>()
-		let created = 0
-		let mode = 0
+		const created = new HookSequence()
+		const mode = new HookSequence()
 		const pool = new Pool({
-			create: () => created++,
+			create: () => created.next(),
 			validate: () => {
-				mode += 1
-				if (mode === 1) return false
+				mode.advance()
+				if (mode.count === 1) return false
 				throw new Error('invalid')
 			},
 			destroy: () => cleanup.promise,
@@ -1831,7 +1957,7 @@ describe('Pool validation and cleanup ownership', () => {
 		held.release()
 		const replacing = pool.acquire()
 		await Promise.resolve()
-		expect(created).toBe(1)
+		expect(created.count).toBe(1)
 		expect(pool.size).toBe(1)
 		cleanup.resolve()
 		const replacement = await replacing
@@ -1842,12 +1968,12 @@ describe('Pool validation and cleanup ownership', () => {
 
 	it('routes invalid-handoff cleanup failure to its bound waiter and continues the next waiter', async () => {
 		const failure = new Error('cleanup failed')
-		let created = 0
+		const created = new HookSequence()
 		const pool = new Pool({
-			create: () => created++,
+			create: () => created.next(),
 			validate: () => false,
 			destroy: () => {
-				if (created === 1) throw failure
+				if (created.count === 1) throw failure
 			},
 			max: 1,
 		})
@@ -1865,19 +1991,19 @@ describe('Pool validation and cleanup ownership', () => {
 			const entered = Promise.withResolvers<void>()
 			const replacement = Promise.withResolvers<void>()
 			const failure = new Error('invalid cleanup failed')
-			let created = 0
-			let destroyed = 0
+			const created = new HookSequence()
+			const destroyed = new HookSequence()
 			const pool = new Pool({
 				create: () => {
-					const value = created
-					created += 1
-					if (created === 2) replacement.resolve()
+					const value = created.count
+					created.advance()
+					if (created.count === 2) replacement.resolve()
 					return value
 				},
 				validate: () => false,
 				destroy: () => {
-					destroyed += 1
-					if (destroyed === 1) {
+					destroyed.advance()
+					if (destroyed.count === 1) {
 						entered.resolve()
 						return cleanup.promise
 					}
@@ -1913,7 +2039,9 @@ describe('Pool validation and cleanup ownership', () => {
 					throw new Error('expected the later waiter to receive the replacement')
 				}
 				expect(secondResult.value.value).toBe(1)
-				expect([created, destroyed, pool.size, pool.idle, pool.active]).toEqual([2, 1, 1, 1, 0])
+				expect([created.count, destroyed.count, pool.size, pool.idle, pool.active]).toEqual([
+					2, 1, 1, 1, 0,
+				])
 			} finally {
 				held.release()
 				cleanup.resolve()
@@ -1925,24 +2053,23 @@ describe('Pool validation and cleanup ownership', () => {
 	it('preserves the FIFO head assignment through reentrant invalid cleanup', async () => {
 		const replacement = Promise.withResolvers<void>()
 		const settled = createRecorder<[number, number]>()
-		let created = 0
-		let validated = 0
-		let reentered: ReturnType<Pool<number>['acquire']> | undefined
+		const created = new HookSequence()
+		const validated = new HookSequence()
+		const client = new ReentrantClient()
 		const pool = new Pool({
-			create: () => created++,
+			create: () => created.next(),
 			validate: () => {
-				validated += 1
-				return validated > 1
+				validated.advance()
+				return validated.count > 1
 			},
 			destroy: () => {},
 			on: {
 				create: () => {
-					if (created === 2) replacement.resolve()
+					if (created.count === 2) replacement.resolve()
 				},
 				destroy: () => {
-					if (reentered === undefined) {
-						reentered = pool.acquire()
-						void reentered.catch(() => {})
+					if (client.pending === undefined) {
+						client.acquire(pool)
 					}
 				},
 			},
@@ -1967,27 +2094,18 @@ describe('Pool validation and cleanup ownership', () => {
 		})
 		void firstUse.catch(() => {})
 		void secondUse.catch(() => {})
-		let thirdUse: Promise<void> | undefined
 
 		try {
 			held.release()
 			await replacement.promise
-			const third = reentered
-			if (third === undefined) throw new Error('destroy listener did not reenter acquisition')
-			thirdUse = third.then((token) => {
-				try {
-					settled.handler(2, token.value)
-				} finally {
-					token.release()
-				}
-			})
+			const thirdUse = client.consume((value) => settled.handler(2, value))
 			await Promise.all([firstUse, secondUse, thirdUse])
 			expect(settled.calls).toEqual([
 				[0, 1],
 				[1, 1],
 				[2, 1],
 			])
-			expect([created, validated]).toEqual([2, 3])
+			expect([created.count, validated.count]).toEqual([2, 3])
 			expect([pool.size, pool.idle, pool.active]).toEqual([1, 1, 0])
 			await pool.destroy()
 		} finally {
@@ -1995,7 +2113,7 @@ describe('Pool validation and cleanup ownership', () => {
 			await Promise.allSettled([
 				firstUse,
 				secondUse,
-				...(thirdUse === undefined ? [] : [thirdUse]),
+				...(client.completion === undefined ? [] : [client.completion]),
 				pool.destroy(),
 			])
 		}
@@ -2008,26 +2126,25 @@ describe('Pool validation and cleanup ownership', () => {
 		const cleanupFailure = new Error('reentrant cleanup failed')
 		const abortReason = new Error('reentrant abort must be too late')
 		const controller = new AbortController()
-		let created = 0
-		let validated = 0
-		let destroyed = 0
-		let reentered: ReturnType<Pool<number>['acquire']> | undefined
+		const created = new HookSequence()
+		const validated = new HookSequence()
+		const destroyed = new HookSequence()
+		const client = new ReentrantClient()
 		const pool = new Pool({
-			create: () => created++,
+			create: () => created.next(),
 			validate: () => {
-				validated += 1
-				return validated > 1
+				validated.advance()
+				return validated.count > 1
 			},
 			destroy: () => {
-				destroyed += 1
-				if (destroyed === 1) throw cleanupFailure
+				destroyed.advance()
+				if (destroyed.count === 1) throw cleanupFailure
 			},
 			on: {
 				destroy: () => {
-					if (reentered !== undefined) return
+					if (client.pending !== undefined) return
 					controller.abort(abortReason)
-					reentered = pool.acquire()
-					void reentered.catch(() => {})
+					client.acquire(pool)
 					observed.resolve()
 				},
 			},
@@ -2052,19 +2169,10 @@ describe('Pool validation and cleanup ownership', () => {
 			}
 		})
 		void secondUse.catch(() => {})
-		let thirdUse: Promise<void> | undefined
 
 		try {
 			await observed.promise
-			const third = reentered
-			if (third === undefined) throw new Error('destroy listener did not reenter acquisition')
-			thirdUse = third.then((token) => {
-				try {
-					settled.handler(2, token.value)
-				} finally {
-					token.release()
-				}
-			})
+			const thirdUse = client.consume((value) => settled.handler(2, value))
 			await Promise.all([firstUse, secondUse, thirdUse])
 			expect(rejected.count).toBe(1)
 			const failure = rejected.calls[0]?.[0]
@@ -2076,14 +2184,14 @@ describe('Pool validation and cleanup ownership', () => {
 				[1, 1],
 				[2, 1],
 			])
-			expect([created, validated, destroyed]).toEqual([2, 2, 1])
+			expect([created.count, validated.count, destroyed.count]).toEqual([2, 2, 1])
 			expect([pool.size, pool.idle, pool.active]).toEqual([1, 1, 0])
 		} finally {
 			held.release()
 			await Promise.allSettled([
 				firstUse,
 				secondUse,
-				...(thirdUse === undefined ? [] : [thirdUse]),
+				...(client.completion === undefined ? [] : [client.completion]),
 				pool.destroy(),
 			])
 		}
@@ -2110,26 +2218,26 @@ describe('Pool validation and cleanup ownership', () => {
 
 	it('repumps a capacity-blocked acquire after clear cleanup completes', async () => {
 		const cleanup = Promise.withResolvers<void>()
-		let created = 0
-		const pool = new Pool({ create: () => created++, destroy: () => cleanup.promise, max: 1 })
+		const created = new HookSequence()
+		const pool = new Pool({ create: () => created.next(), destroy: () => cleanup.promise, max: 1 })
 		const held = await pool.acquire()
 		held.release()
 		const clearing = pool.clear()
 		const acquiring = pool.acquire()
 
 		await Promise.resolve()
-		expect(created).toBe(1)
+		expect(created.count).toBe(1)
 		cleanup.resolve()
 		await clearing
 		await expect(acquiring).resolves.toMatchObject({ value: 1 })
-		expect(created).toBe(2)
+		expect(created.count).toBe(2)
 	})
 
 	it('frees capacity after failed clear cleanup and preserves the cleanup error', async () => {
 		const cleanup = Promise.withResolvers<void>()
 		const failure = new Error('clear failed')
-		let created = 0
-		const pool = new Pool({ create: () => created++, destroy: () => cleanup.promise, max: 1 })
+		const created = new HookSequence()
+		const pool = new Pool({ create: () => created.next(), destroy: () => cleanup.promise, max: 1 })
 		const held = await pool.acquire()
 		held.release()
 		const clearing = pool.clear()
@@ -2138,7 +2246,7 @@ describe('Pool validation and cleanup ownership', () => {
 		cleanup.reject(failure)
 		await expect(clearing).rejects.toMatchObject({ code: 'cleanup', cause: failure })
 		await expect(acquiring).resolves.toMatchObject({ value: 1 })
-		expect(created).toBe(2)
+		expect(created.count).toBe(2)
 	})
 
 	it('retains cleanup failure after cancelled invalid validation for eventual teardown', async () => {
@@ -2205,9 +2313,9 @@ describe('Pool validation and cleanup ownership', () => {
 			Promise.withResolvers<void>(),
 		]
 		const destroyed = createRecorder<[number]>()
-		let created = 0
+		const created = new HookSequence()
 		const pool = new Pool({
-			create: () => created++,
+			create: () => created.next(),
 			destroy: (value) => {
 				destroyed.handler(value)
 				return gates[value]?.promise
@@ -2232,9 +2340,9 @@ describe('Pool destruction', () => {
 		const pool = new Pool({ create: () => 1, destroy: () => cleanup.promise })
 		const token = await pool.acquire()
 		token.release()
-		let reentered: Promise<void> | undefined
+		const reentered = createRecorder<[Promise<void>]>()
 		pool.emitter.on('destroy', () => {
-			reentered = pool.destroy()
+			reentered.handler(pool.destroy())
 		})
 
 		const first = pool.destroy()
@@ -2242,7 +2350,8 @@ describe('Pool destruction', () => {
 		expect(first).toBe(second)
 		cleanup.resolve()
 		await first
-		expect(reentered).toBe(first)
+		expect(reentered.calls).toEqual([[first]])
+		expect(reentered.calls[0]?.[0]).toBe(first)
 		expect(pool.emitter.destroyed).toBe(true)
 		await expect(pool.acquire()).rejects.toMatchObject({ code: 'destroyed' })
 	})
@@ -2358,9 +2467,9 @@ describe('Pool destruction', () => {
 
 	it('aggregates distinct teardown failures and destroys the emitter last', async () => {
 		const failures = [new Error('first'), new Error('second')]
-		let created = 0
+		const created = new HookSequence()
 		const pool = new Pool({
-			create: () => created++,
+			create: () => created.next(),
 			destroy: (value) => {
 				throw failures[value]
 			},
@@ -2432,20 +2541,20 @@ describe('Pool observation and pressure', () => {
 
 	it('serves high contention without exceeding max or stranding waiters', async () => {
 		const max = 3
-		let created = 0
-		let observed = 0
-		const pool = new Pool({ create: () => created++, max })
+		const created = new HookSequence()
+		const pool = new Pool({ create: () => created.next(), max })
 
-		await Promise.all(
+		const observations = await Promise.all(
 			Array.from({ length: 60 }, async () => {
 				const token = await pool.acquire()
-				observed = Math.max(observed, pool.active)
+				const active = pool.active
 				await Promise.resolve()
 				token.release()
+				return active
 			}),
 		)
-		expect(created).toBe(max)
-		expect(observed).toBeLessThanOrEqual(max)
+		expect(created.count).toBe(max)
+		expect(Math.max(0, ...observations)).toBeLessThanOrEqual(max)
 		expect([pool.size, pool.idle, pool.active]).toEqual([max, max, 0])
 	})
 })

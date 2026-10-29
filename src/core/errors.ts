@@ -1,5 +1,5 @@
 import type { PoolErrorOptions } from './types.js'
-import { isError, isInstance, isString } from '@orkestrel/contract'
+import { holds, INTRINSICS, isArray, isError, isObject, isString } from '@orkestrel/contract'
 
 /**
  * Represents a stable, machine-readable pool failure that retains the original thrown value as
@@ -28,18 +28,15 @@ export class PoolError extends Error {
 	 * @param options - Stable code plus optional cause and structured context
 	 */
 	constructor(options: PoolErrorOptions) {
-		let message = 'pool input is invalid'
-		if (options.code === 'destroyed') message = 'pool is destroyed'
-		if (options.code === 'create') message = 'pool create failed'
-		if (options.code === 'cleanup') message = 'pool cleanup failed'
-		if (
-			isError(options.cause) &&
-			isString(options.cause.message) &&
-			options.cause.message.length > 0
-		) {
-			message = `${message}: ${options.cause.message}`
-		}
+		const destroyed = options.code === 'destroyed' ? 'pool is destroyed' : 'pool input is invalid'
+		const created = options.code === 'create' ? 'pool create failed' : destroyed
+		const reason = options.code === 'cleanup' ? 'pool cleanup failed' : created
+		const message =
+			isError(options.cause) && isString(options.cause.message) && options.cause.message.length > 0
+				? `${reason}: ${options.cause.message}`
+				: reason
 		super(message, options.cause === undefined ? undefined : { cause: options.cause })
+		INTRINSICS.define(this, Symbol.for('@orkestrel/pool.PoolError'), { value: this })
 		this.name = 'PoolError'
 		this.code = options.code
 		this.context = options.context
@@ -47,7 +44,11 @@ export class PoolError extends Error {
 }
 
 /**
- * Tests whether an unknown value is a {@link PoolError}, returning `false` for hostile proxies.
+ * Tests whether an unknown value is a branded {@link PoolError} with declared code and context.
+ *
+ * @remarks
+ * Accepts subclasses and errors from another installed copy without reading `name`. Refuses
+ * transparent proxies, unbranded look-alikes, and plain branded objects.
  *
  * @param value - The unknown boundary value
  * @returns True if the value is a real `PoolError` instance; false otherwise
@@ -59,5 +60,19 @@ export class PoolError extends Error {
  * ```
  */
 export function isPoolError(value: unknown): value is PoolError {
-	return isInstance(value, PoolError)
+	if (!isObject(value)) return false
+	return holds(() => {
+		if (!(value instanceof INTRINSICS.error)) return false
+		if (INTRINSICS.prototype(value) === INTRINSICS.error.prototype) return false
+		const brand = INTRINSICS.describe(value, Symbol.for('@orkestrel/pool.PoolError'))
+		if (brand?.value !== value) return false
+		const code: unknown = INTRINSICS.reflect.read(value, 'code')
+		if (code !== 'invalid' && code !== 'destroyed' && code !== 'create' && code !== 'cleanup')
+			return false
+		const context: unknown = INTRINSICS.reflect.read(value, 'context')
+		if (context === undefined) return true
+		if (!isObject(context)) return false
+		const failures: unknown = INTRINSICS.reflect.read(context, 'failures')
+		return failures === undefined || isArray(failures)
+	})
 }

@@ -25,13 +25,49 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const RECOGNITION = `import { createRequire } from 'node:module'
+import { cpSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+const imported = await import('@orkestrel/pool')
+const required = createRequire(import.meta.url)('@orkestrel/pool')
+const manifest = createRequire(import.meta.url).resolve('@orkestrel/pool/package.json')
+const copy = join(dirname(dirname(manifest)), 'pool-copy')
+cpSync(dirname(manifest), copy, { recursive: true })
+const copied = await import(pathToFileURL(join(copy, 'dist/src/core/index.js')).href)
+class SpecializedError extends imported.PoolError {
+	constructor() {
+		super({ code: 'invalid' })
+		this.name = 'SpecializedError'
+	}
+}
+const entries = [imported, required, copied]
+const errors = entries.map((entry) => new entry.PoolError({ code: 'invalid' }))
+const subclass = new SpecializedError()
+const lookalike = Object.assign(new Error('fixture'), { code: 'invalid' })
+const plain = {}
+Object.defineProperty(plain, Symbol.for('@orkestrel/pool.PoolError'), { value: plain })
+process.stdout.write(JSON.stringify({
+	distinct: new Set(entries.map((entry) => entry.PoolError)).size,
+	answers: entries.map((entry) => [
+		...errors.map((error) => entry.isPoolError(error)),
+		entry.isPoolError(subclass),
+		entry.isPoolError(lookalike),
+		entry.isPoolError(new Proxy(errors[0], {})),
+		entry.isPoolError(plain),
+	]),
+}))
+`
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 // The compiler this workspace installs, run as a command rather than called in
 // process: the command and its plain-text diagnostics are the same across the
 // compiler majors this toolchain supports, and its in-process API is not. It is
 // resolved from the workspace under proof, so a consumer of the packed artifact is
 // checked by the same compiler that workspace's own `check` script runs.
-const TSC = createRequire(join(ROOT, 'package.json')).resolve('typescript/bin/tsc')
+const TSC = join(
+	dirname(createRequire(join(ROOT, 'package.json')).resolve('typescript/package.json')),
+	'bin/tsc',
+)
 // Windows needs a shell to launch a `.cmd`: Node refuses one directly since the
 // batch-argument hardening, and `spawnSync` returns `EINVAL` with a null status
 // rather than an exit code a caller can read. Every following argument is a literal or
@@ -190,14 +226,18 @@ function isNames(value: unknown): value is readonly string[] {
 // package and a target containing a dot, parent, or node_modules segment during
 // package-target resolution. A later module-resolution failure is not the same
 // thing: an array falls through the former and keeps the latter.
+function decodeSegment(segment: string): string {
+	try {
+		return decodeURIComponent(segment)
+	} catch {
+		return segment
+	}
+}
+
 function isPackageTarget(target: string): boolean {
 	if (!target.startsWith('./')) return false
 	for (const segment of target.slice(2).split(/[\\/]/u)) {
-		let decoded = segment
-		try {
-			decoded = decodeURIComponent(segment)
-		} catch {}
-		const normalized = decoded.toLowerCase()
+		const normalized = decodeSegment(segment).toLowerCase()
 		if (normalized === '.' || normalized === '..' || normalized === 'node_modules') return false
 	}
 	return true
@@ -284,11 +324,15 @@ function matchesFile(path: string): boolean {
 // the containing condition or fallback list unresolved, so the walk continues.
 function targetToDeclaration(target: string, installed: string): string | undefined {
 	if (!isPackageTarget(target)) return undefined
-	let declaration = target
-	if (target.endsWith('.cjs')) declaration = `${target.slice(0, -4)}.d.cts`
-	else if (target.endsWith('.mjs')) declaration = `${target.slice(0, -4)}.d.mts`
-	else if (target.endsWith('.js')) declaration = `${target.slice(0, -3)}.d.ts`
-	else if (!isDeclaration(target)) return undefined
+	const substitution = [
+		['.cjs', '.d.cts'],
+		['.mjs', '.d.mts'],
+		['.js', '.d.ts'],
+	].find(([extension]) => extension !== undefined && target.endsWith(extension))
+	const [extension, suffix] = substitution ?? []
+	if (extension === undefined && !isDeclaration(target)) return undefined
+	const declaration =
+		extension === undefined ? target : `${target.slice(0, -extension.length)}${suffix}`
 	return matchesFile(join(installed, declaration)) ? declaration : undefined
 }
 
@@ -320,8 +364,14 @@ function resolveDeclaration(
 // physical nested manifest starts a scope even when it omits `type` or cannot be
 // parsed. A directory at that spelling is not a manifest, so the walk continues.
 function readPackageType(installed: string, target: string): unknown {
-	let directory = dirname(join(installed, target))
-	while (true) {
+	const start = dirname(join(installed, target))
+	const ancestors = [
+		start,
+		...Array.from(start.matchAll(/[\\/]/gu), (match) =>
+			dirname(start.slice(0, match.index + 1) + '_'),
+		).reverse(),
+	]
+	for (const directory of ancestors) {
 		const path = join(directory, 'package.json')
 		if (matchesFile(path)) {
 			try {
@@ -332,10 +382,8 @@ function readPackageType(installed: string, target: string): unknown {
 			}
 		}
 		if (directory === installed) return undefined
-		const parent = dirname(directory)
-		if (parent === directory) return undefined
-		directory = parent
 	}
+	return undefined
 }
 
 function resolvesBrowser(entry: unknown): boolean {
@@ -869,6 +917,18 @@ describe('installed package consumer', () => {
 		const stage = requireStage(context)
 		const faces = stage.entries.filter((entry) => entry.browser)
 		expect(faces.map((entry) => entry.subpath)).toStrictEqual([])
+	})
+})
+
+it('recognizes errors across formats and physical copies without admitting lookalikes', (context) => {
+	const stage = requireStage(context)
+	const driver = join(stage.consumer, 'recognize.mjs')
+	writeFile(driver, RECOGNITION)
+	const result = runNode([driver], stage.consumer)
+	if (result.status !== 0) throw new Error(`The recognition driver failed: ${readOutput(result)}`)
+	expect(JSON.parse(result.stdout)).toStrictEqual({
+		distinct: 3,
+		answers: Array.from({ length: 3 }, () => [true, true, true, true, false, false, false]),
 	})
 })
 

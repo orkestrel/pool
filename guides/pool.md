@@ -56,7 +56,7 @@ In a guard table a `Shape` cell holds the type the guard narrows to.
 
 | API            | Kind     | Shape         | Summary                                                                                                          |
 | -------------- | -------- | ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `isPoolError`  | function | `PoolError`   | Tests whether an unknown value is a `PoolError`, returning `false` for hostile proxies.                          |
+| `isPoolError`  | function | `PoolError`   | Tests whether an unknown value is a branded `PoolError` with declared code and context.                          |
 | `isPoolLimit`  | function | `number`      | Tests whether a value is a positive safe integer for a pool record or lease limit.                               |
 | `isPoolSignal` | function | `AbortSignal` | Tests whether a value is a native `AbortSignal` for the acquire boundary, returning `false` for hostile proxies. |
 
@@ -305,6 +305,13 @@ hook attempt, then the stable barrier resolves or rejects.
 The original thrown value is retained as `cause`; aggregate cleanup values are also in
 `context.failures`. Message construction and `isPoolError` avoid unsafe string coercion and
 return safely for hostile proxies.
+
+Recognition requires an own identity brand at `Symbol.for('@orkestrel/pool.PoolError')`,
+the global `Error` base with a subclass prototype, a declared code, and valid optional context.
+The brand is non-enumerable and non-writable. Guards from separate installed copies and module
+formats recognize each other's errors. Subclasses pass without reading `name`; transparent
+proxies, unbranded look-alikes, and plain objects carrying only the brand fail. Errors created
+by older releases without this brand no longer pass the guard.
 
 ## Observing
 
