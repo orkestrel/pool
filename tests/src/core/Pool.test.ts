@@ -1,4 +1,4 @@
-import type { PoolEventMap, PoolToken } from '@src/core'
+import type { PoolEventMap } from '@src/core'
 import type { PoolEvent } from '../../setup.js'
 import { describe, expect, it } from 'vitest'
 import { Pool, PoolError, isPoolError, isPoolSignal } from '@src/core'
@@ -8,76 +8,14 @@ import { Pool, PoolError, isPoolError, isPoolSignal } from '@src/core'
 // stays 0 here whatever the pool does. Do not swap this import back.
 import { EventEmitter, getEventListeners, once } from 'node:events'
 import { createRecorder, createRecorders, waitForDelay } from '@orkestrel/test'
-import { POOL_EVENTS, createFloorFixture } from '../../setup.js'
-
-class SpecializedPoolError extends PoolError {}
-
-class HookSequence {
-	#count = 0
-
-	get count(): number {
-		return this.#count
-	}
-
-	next(): number {
-		const value = this.#count
-		this.#count += 1
-		return value
-	}
-
-	advance(): number {
-		this.#count += 1
-		return this.#count
-	}
-}
-
-class HookCondition {
-	#value: boolean
-
-	constructor(value: boolean) {
-		this.#value = value
-	}
-
-	get value(): boolean {
-		return this.#value
-	}
-
-	set(value: boolean): void {
-		this.#value = value
-	}
-}
-
-class ReentrantClient {
-	#pending: Promise<PoolToken<number>> | undefined
-	#completion: Promise<void> | undefined
-
-	get pending(): Promise<PoolToken<number>> | undefined {
-		return this.#pending
-	}
-
-	get completion(): Promise<void> | undefined {
-		return this.#completion
-	}
-
-	acquire(pool: Pool<number>): void {
-		if (this.#pending !== undefined) throw new Error('reentrant acquisition already started')
-		this.#pending = pool.acquire()
-		void this.#pending.catch(() => {})
-	}
-
-	consume(observe: (value: number) => void): Promise<void> {
-		if (this.#completion !== undefined) throw new Error('reentrant consumption already started')
-		if (this.#pending === undefined) throw new Error('destroy listener did not reenter acquisition')
-		this.#completion = this.#pending.then((token) => {
-			try {
-				observe(token.value)
-			} finally {
-				token.release()
-			}
-		})
-		return this.#completion
-	}
-}
+import {
+	POOL_EVENTS,
+	createFloorFixture,
+	SpecializedPoolError,
+	HookSequence,
+	HookCondition,
+	ReentrantClient,
+} from '../../setup.js'
 
 describe('Pool sharing', () => {
 	it('rejects invalid per-record capacity and snapshots it once', async () => {

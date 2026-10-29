@@ -1,5 +1,5 @@
-import type { PoolEventMap, PoolOptions } from '@src/core'
-import { Pool } from '@src/core'
+import type { PoolEventMap, PoolOptions, PoolToken } from '@src/core'
+import { Pool, PoolError } from '@src/core'
 
 // ── Environment-agnostic base setup ───────────────────────────────────────────
 //
@@ -90,4 +90,77 @@ export function createFloorFixture(
 	options: Partial<PoolOptions<FloorResource>> = {},
 ): FloorFixture {
 	return new FloorObserver(options)
+}
+
+/** Provides a derived pool error for recognition tests. */
+export class SpecializedPoolError extends PoolError {}
+
+/** Tracks sequential hook invocations. */
+export class HookSequence {
+	#count = 0
+
+	get count(): number {
+		return this.#count
+	}
+
+	next(): number {
+		const value = this.#count
+		this.#count += 1
+		return value
+	}
+
+	advance(): number {
+		this.#count += 1
+		return this.#count
+	}
+}
+
+/** Holds a condition that a test changes between hook invocations. */
+export class HookCondition {
+	#value: boolean
+
+	constructor(value: boolean) {
+		this.#value = value
+	}
+
+	get value(): boolean {
+		return this.#value
+	}
+
+	set(value: boolean): void {
+		this.#value = value
+	}
+}
+
+/** Acquires and consumes a pool token from reentrant callbacks. */
+export class ReentrantClient {
+	#pending: Promise<PoolToken<number>> | undefined
+	#completion: Promise<void> | undefined
+
+	get pending(): Promise<PoolToken<number>> | undefined {
+		return this.#pending
+	}
+
+	get completion(): Promise<void> | undefined {
+		return this.#completion
+	}
+
+	acquire(pool: Pool<number>): void {
+		if (this.#pending !== undefined) throw new Error('reentrant acquisition already started')
+		this.#pending = pool.acquire()
+		void this.#pending.catch(() => {})
+	}
+
+	consume(observe: (value: number) => void): Promise<void> {
+		if (this.#completion !== undefined) throw new Error('reentrant consumption already started')
+		if (this.#pending === undefined) throw new Error('destroy listener did not reenter acquisition')
+		this.#completion = this.#pending.then((token) => {
+			try {
+				observe(token.value)
+			} finally {
+				token.release()
+			}
+		})
+		return this.#completion
+	}
 }
