@@ -39,13 +39,13 @@ try {
 
 ### Factories
 
-| API          | Kind     | Summary                                                                                                                                             |
+| Name         | Kind     | Summary                                                                                                                                             |
 | ------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `createPool` | function | Creates a distinct `PoolInterface` from resource lifecycle hooks, with optional bounded capacity, exclusive leases by default, and FIFO settlement. |
 
 ### Classes
 
-| API         | Kind  | Summary                                                                                                                                                                                                                    |
+| Name        | Kind  | Summary                                                                                                                                                                                                                    |
 | ----------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Pool`      | class | Represents a resource pool with optional bounded capacity and a warm floor, whose opaque ownership records preserve FIFO settlement, cancellation, exact lease release, and deterministic teardown under concurrent hooks. |
 | `PoolError` | class | Represents a stable, machine-readable pool failure that retains the original thrown value as its cause without unsafe coercion, alongside structured context.                                                              |
@@ -54,7 +54,7 @@ try {
 
 In a guard table a `Shape` cell holds the type the guard narrows to.
 
-| API            | Kind     | Shape         | Summary                                                                                                          |
+| Name           | Kind     | Shape         | Summary                                                                                                          |
 | -------------- | -------- | ------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `isPoolError`  | function | `PoolError`   | Tests whether an unknown value is a branded `PoolError` with declared code and context.                          |
 | `isPoolLimit`  | function | `number`      | Tests whether a value is a positive safe integer for a pool record or lease limit.                               |
@@ -64,7 +64,7 @@ In a guard table a `Shape` cell holds the type the guard narrows to.
 
 A `Shape` cell holds an interface's data members as bare names in braces, `?` marking an optional member and `plus` introducing its call-signature members, and a type alias's own type literal with a union's arms escaped as `\|`.
 
-| API                | Kind      | Shape                                                                                    | Summary                                                                                                                                                                            |
+| Name               | Kind      | Shape                                                                                    | Summary                                                                                                                                                                            |
 | ------------------ | --------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PoolCode`         | type      | `'invalid' \| 'destroyed' \| 'create' \| 'cleanup'`                                      | Names the machine-readable failure codes produced by `PoolError`.                                                                                                                  |
 | `PoolContext`      | interface | `{ value?, failures? }`                                                                  | Represents the structured context attached to a `PoolError`: the rejected input, or the distinct destroy-hook failures an aggregate cleanup collected.                             |
