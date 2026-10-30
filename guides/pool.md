@@ -39,40 +39,40 @@ try {
 
 ### Factories
 
-| Name         | Kind     | Summary                                                                                                                                             |
-| ------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `createPool` | function | Creates a distinct `PoolInterface` from resource lifecycle hooks, with optional bounded capacity, exclusive leases by default, and FIFO settlement. |
+| Name         | Kind     | Signature                                          | Summary                                                                                                                                             |
+| ------------ | -------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createPool` | function | `<T>(options: PoolOptions<T>) => PoolInterface<T>` | Creates a distinct `PoolInterface` from resource lifecycle hooks, with optional bounded capacity, exclusive leases by default, and FIFO settlement. |
 
 ### Classes
 
-| Name        | Kind  | Summary                                                                                                                                                                                                                    |
-| ----------- | ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Pool`      | class | Represents a resource pool with optional bounded capacity and a warm floor, whose opaque ownership records preserve FIFO settlement, cancellation, exact lease release, and deterministic teardown under concurrent hooks. |
-| `PoolError` | class | Represents a stable, machine-readable pool failure that retains the original thrown value as its cause without unsafe coercion, alongside structured context.                                                              |
+| Name        | Kind  | Signature                                              | Summary                                                                                                                                                                                                                    |
+| ----------- | ----- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Pool`      | class | `new <T>(options: PoolOptions<T>) => PoolInterface<T>` | Represents a resource pool with optional bounded capacity and a warm floor, whose opaque ownership records preserve FIFO settlement, cancellation, exact lease release, and deterministic teardown under concurrent hooks. |
+| `PoolError` | class | `new (options: PoolErrorOptions) => PoolError`         | Represents a stable, machine-readable pool failure that retains the original thrown value as its cause without unsafe coercion, alongside structured context.                                                              |
 
 ### Guards
 
 In a guard table a `Shape` cell holds the type the guard narrows to.
 
-| Name           | Kind     | Shape         | Summary                                                                                                          |
-| -------------- | -------- | ------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `isPoolError`  | function | `PoolError`   | Tests whether an unknown value is a branded `PoolError` with declared code and context.                          |
-| `isPoolLimit`  | function | `number`      | Tests whether a value is a positive safe integer for a pool record or lease limit.                               |
-| `isPoolSignal` | function | `AbortSignal` | Tests whether a value is a native `AbortSignal` for the acquire boundary, returning `false` for hostile proxies. |
+| Name           | Kind     | Signature                                  | Summary                                                                                                          |
+| -------------- | -------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `isPoolError`  | function | `(value: unknown) => value is PoolError`   | Tests whether an unknown value is a branded `PoolError` with declared code and context.                          |
+| `isPoolLimit`  | function | `(value: unknown) => value is number`      | Tests whether a value is a positive safe integer for a pool record or lease limit.                               |
+| `isPoolSignal` | function | `(value: unknown) => value is AbortSignal` | Tests whether a value is a native `AbortSignal` for the acquire boundary, returning `false` for hostile proxies. |
 
 ### Types
 
 A `Shape` cell holds an interface's data members as bare names in braces, `?` marking an optional member and `plus` introducing its call-signature members, and a type alias's own type literal with a union's arms escaped as `\|`.
 
-| Name               | Kind      | Shape                                                                                    | Summary                                                                                                                                                                            |
-| ------------------ | --------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PoolCode`         | type      | `'invalid' \| 'destroyed' \| 'create' \| 'cleanup'`                                      | Names the machine-readable failure codes produced by `PoolError`.                                                                                                                  |
-| `PoolContext`      | interface | `{ value?, failures? }`                                                                  | Represents the structured context attached to a `PoolError`: the rejected input, or the distinct destroy-hook failures an aggregate cleanup collected.                             |
-| `PoolErrorOptions` | interface | `{ code, cause?, context? }`                                                             | Represents the construction options for `PoolError`: the stable code, an optional cause, and optional structured context.                                                          |
-| `PoolEventMap`     | type      | `{ create, acquire, release, destroy }`                                                  | Represents the observable resource lifecycle events emitted by a `PoolInterface`.                                                                                                  |
-| `PoolToken`        | interface | `{ value } plus release, destroy`                                                        | Represents a unique lease over one pool-owned resource record, exposing that record as a readonly `value` and ending it through an idempotent `release` or `destroy`.              |
-| `PoolOptions`      | interface | `{ on?, error?, create, destroy?, validate?, watch?, capacity?, max?, min?, restarts? }` | Represents the resource lifecycle options for `Pool` and `createPool`: creation, destruction, validation, capacity, a bounded warm floor, and loss observation.                    |
-| `PoolInterface`    | interface | `{ emitter, size, idle, active } plus start, acquire, clear, destroy`                    | Represents a FIFO resource pool with optional bounded capacity, a warm floor, loss recovery, and deterministic teardown, exposing its record counts and a typed lifecycle emitter. |
+| Name               | Kind      | Signature                                                                                                                        | Summary                                                                                                                                                                            |
+| ------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PoolCode`         | type      | `'invalid' \| 'destroyed' \| 'create' \| 'cleanup'`                                                                              | Names the machine-readable failure codes produced by `PoolError`.                                                                                                                  |
+| `PoolContext`      | interface | `{ value?, failures? }`                                                                                                          | Represents the structured context attached to a `PoolError`: the rejected input, or the distinct destroy-hook failures an aggregate cleanup collected.                             |
+| `PoolErrorOptions` | interface | `{ code, cause?, context? }`                                                                                                     | Represents the construction options for `PoolError`: the stable code, an optional cause, and optional structured context.                                                          |
+| `PoolEventMap`     | type      | `{ readonly create: readonly []; readonly acquire: readonly []; readonly release: readonly []; readonly destroy: readonly []; }` | Represents the observable resource lifecycle events emitted by a `PoolInterface`.                                                                                                  |
+| `PoolToken`        | interface | `{ value, release(), destroy() }`                                                                                                | Represents a unique lease over one pool-owned resource record, exposing that record as a readonly `value` and ending it through an idempotent `release` or `destroy`.              |
+| `PoolOptions`      | interface | `{ on?, error?, create, destroy?, validate?, watch?, capacity?, max?, min?, restarts? }`                                         | Represents the resource lifecycle options for `Pool` and `createPool`: creation, destruction, validation, capacity, a bounded warm floor, and loss observation.                    |
+| `PoolInterface`    | interface | `{ emitter, size, idle, active, start(), acquire(), clear(), destroy() }`                                                        | Represents a FIFO resource pool with optional bounded capacity, a warm floor, loss recovery, and deterministic teardown, exposing its record counts and a typed lifecycle emitter. |
 
 `size` counts every owned record, including records being validated, destroyed, or retained
 after failed cleanup under `min`. `idle` counts available records with no live lease or pending
